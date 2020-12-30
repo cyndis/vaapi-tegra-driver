@@ -223,8 +223,8 @@ FUNC(PutSurface, VASurfaceID surface, void* draw, short srcx, short srcy,
 
     DrmDevice &device = *DRIVER_DATA->drm;
 
-    dri_drawable = dri_get_drawable(ctx, (Drawable)draw);
-    dri_buffer = dri_get_rendering_buffer(ctx, dri_drawable);
+    dri_drawable = va_dri_get_drawable(ctx, (Drawable)draw);
+    dri_buffer = va_dri_get_rendering_buffer(ctx, dri_drawable);
 
     GemBuffer buffer(device);
     buffer.openByName(dri_buffer->dri2.name);
@@ -256,7 +256,7 @@ FUNC(PutSurface, VASurfaceID surface, void* draw, short srcx, short srcy,
 
     vic.run(op);
 
-    dri_swap_buffer(ctx, dri_drawable);
+    va_dri_swap_buffer(ctx, dri_drawable);
 
     return VA_STATUS_SUCCESS;
 }
@@ -405,7 +405,7 @@ FUNC(UnlockSurface, VASurfaceID surface)
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
 
-extern "C" VAStatus __vaDriverInit_0_39(VADriverContextP ctx)
+extern "C" VAStatus __vaDriverInit_1_0(VADriverContextP ctx)
 {
     struct VADriverVTable * const vtbl = ctx->vtable;
 

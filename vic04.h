@@ -29,13 +29,19 @@
 #define VIC_UCLASS_METHOD_DATA					0x11
 
 #define NVB0B6_VIDEO_COMPOSITOR_EXECUTE				0x00000300
-#define NVB0B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_LUMA_OFFSET	0x00000400
+#define NVB0B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_LUMA_OFFSET	0x0000400
 #define NVB0B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_CHROMA_U_OFFSET \
 								0x00000404
 #define NVB0B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_CHROMA_V_OFFSET \
 								0x00000408
+#define NVB1B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_LUMA_OFFSET	0x00001200
+#define NVB1B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_CHROMA_U_OFFSET \
+								0x00001204
+#define NVB1B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_CHROMA_V_OFFSET \
+								0x00001208
 #define NVB0B6_VIDEO_COMPOSITOR_SET_CONTROL_PARAMS		0x00000704
 #define NVB0B6_VIDEO_COMPOSITOR_SET_CONFIG_STRUCT_OFFSET	0x00000708
+#define NVB0B6_VIDEO_COMPOSITOR_SET_FILTER_STRUCT_OFFSET	0x0000070C
 #define NVB0B6_VIDEO_COMPOSITOR_SET_HIST_OFFSET			0x00000714
 #define NVB0B6_VIDEO_COMPOSITOR_SET_OUTPUT_SURFACE_LUMA_OFFSET	0x00000720
 
@@ -302,14 +308,22 @@ typedef struct _SlotStruct {
 } SlotStruct;
 
 
-typedef struct _ConfigStruct {
+typedef struct _ConfigStruct_VIC40 {
     PipeConfig       pipeConfig;
     OutputConfig     outputConfig;
     OutputSurfaceConfig                  outputSurfaceConfig;
     MatrixStruct                         outColorMatrixStruct;
     ClearRectStruct                      clearRectStruct[4];
     SlotStruct                           slotStruct[8];
-} ConfigStruct;
+} ConfigStruct_VIC40;
 
+typedef struct _ConfigStruct_VIC41 {
+    PipeConfig       pipeConfig;
+    OutputConfig     outputConfig;
+    OutputSurfaceConfig                  outputSurfaceConfig;
+    MatrixStruct                         outColorMatrixStruct;
+    ClearRectStruct                      clearRectStruct[4];
+    SlotStruct                           slotStruct[16];
+} ConfigStruct_VIC41;
 
 #endif

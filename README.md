@@ -10,6 +10,7 @@ Currently supported features:
 Currently supported SoC's:
 
 - Tegra210
+- Tegra186
 
 ## Requirements
 

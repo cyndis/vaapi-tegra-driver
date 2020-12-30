@@ -70,9 +70,15 @@ public:
 private:
     DrmDevice &_dev;
 
+    enum Version {
+        Vic4_0,
+        Vic4_1
+    };
+    Version _version;
+
     uint64_t _context;
     uint32_t _syncpt;
-    GemBuffer _cmd_bo, _config_bo;
+    GemBuffer _cmd_bo, _config_bo, _filter_bo;
 };
 
 #endif // GEM_H

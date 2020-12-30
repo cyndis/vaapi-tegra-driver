@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cmath>
+#include <cerrno>
 
 #include "vic.h"
 #include "vic04.h"
@@ -109,7 +110,7 @@ void VicOp::setClear(float r, float g, float b) {
 }
 
 VicDevice::VicDevice(DrmDevice &dev)
-: _dev(dev), _cmd_bo(dev), _config_bo(dev)
+: _dev(dev), _cmd_bo(dev), _config_bo(dev), _filter_bo(dev)
 {
 }
 
@@ -124,7 +125,27 @@ VicDevice::~VicDevice() {
 
 int VicDevice::open() {
     struct drm_tegra_open_channel open_channel_args;
+    char tmp[30] = {0};
+    FILE *fp;
     int err;
+
+    fp = fopen("/sys/devices/soc0/soc_id", "r");
+    if (!fp) {
+        perror("Failed to open /sys/devices/soc0/soc_id");
+        return -errno;
+    }
+
+    fread(tmp, 1, sizeof(tmp)-1, fp);
+    if (!strcmp(tmp, "33\n"))
+        _version = Version::Vic4_0;
+    else if (!strcmp(tmp, "24\n"))
+        _version = Version::Vic4_1;
+    else {
+        printf("Unknown chip\n");
+        return -1;
+    }
+
+    fclose(fp);
 
     memset(&open_channel_args, 0, sizeof(open_channel_args));
     open_channel_args.client = HOST1X_CLASS_VIC;
@@ -141,7 +162,11 @@ int VicDevice::open() {
     if (err)
         return err;
 
-    err = _config_bo.allocate(sizeof(ConfigStruct));
+    err = _config_bo.allocate(sizeof(ConfigStruct_VIC41));
+    if (err)
+        return err;
+
+    err = _filter_bo.allocate(0x3000);
     if (err)
         return err;
 
@@ -164,9 +189,10 @@ int VicDevice::open() {
 int VicDevice::run(VicOp &op)
 {
     int err, i;
-    ConfigStruct *c = (ConfigStruct *)_config_bo.map();
+    ConfigStruct_VIC41 *c = (ConfigStruct_VIC41 *)_config_bo.map();
     uint32_t *cmd = (uint32_t *)_cmd_bo.map();
     std::vector<drm_tegra_reloc> relocs;
+    bool is41 = _version == Version::Vic4_1;
 
     if (!c || !cmd)
         return 1;
@@ -183,8 +209,7 @@ int VicDevice::run(VicOp &op)
     c->outputConfig.BackgroundB = op.clearB() * 1023;
 
     c->outputSurfaceConfig.OutPixelFormat = VIC_PIXEL_FORMAT_A8R8G8B8;
-    c->outputSurfaceConfig.OutBlkKind = VIC_BLK_KIND_GENERIC_16Bx2;
-    c->outputSurfaceConfig.OutBlkHeight = 4;
+    c->outputSurfaceConfig.OutBlkKind = VIC_BLK_KIND_PITCH;
     c->outputSurfaceConfig.OutSurfaceWidth = op.output().width-1;
     c->outputSurfaceConfig.OutSurfaceHeight = op.output().height-1;
     c->outputSurfaceConfig.OutLumaWidth = op.output().pitch-1;
@@ -246,23 +271,30 @@ int VicDevice::run(VicOp &op)
     relocs.push_back(__reloc);\
 } while(0);
 
-    M(NVB0B6_VIDEO_COMPOSITOR_SET_CONTROL_PARAMS, (sizeof(*c) / 16) << 16);
+    M(NVB0B6_VIDEO_COMPOSITOR_SET_CONTROL_PARAMS,
+        ((is41 ? sizeof(ConfigStruct_VIC41) : sizeof(ConfigStruct_VIC40)) / 16) << 16);
     M(NVB0B6_VIDEO_COMPOSITOR_SET_CONFIG_STRUCT_OFFSET, 0xdeadbeef);
     BO(&_config_bo, 0);
+    M(NVB0B6_VIDEO_COMPOSITOR_SET_FILTER_STRUCT_OFFSET, 0xdeadbeef);
+    BO(&_filter_bo, 0);
     M(NVB0B6_VIDEO_COMPOSITOR_SET_OUTPUT_SURFACE_LUMA_OFFSET, 0xdeadbeef);
     BO(op.output().bo, 0);
 
     if (in0.bo) {
-        M(NVB0B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_LUMA_OFFSET, 0xdeadbeef);
+        M(is41 ? NVB1B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_LUMA_OFFSET
+               : NVB0B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_LUMA_OFFSET,
+            0xdeadbeef);
         BO(in0.bo, 0);
 
-        M(NVB0B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_CHROMA_U_OFFSET, 0xdeadbeef);
+        M(is41 ? NVB1B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_CHROMA_U_OFFSET
+               : NVB0B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_CHROMA_U_OFFSET,
+               0xdeadbeef);
         BO(in0.bo, in0.pitch * in0.height);
     }
 
     M(NVB0B6_VIDEO_COMPOSITOR_EXECUTE, (1 << 8));
     cmd[i++] = host1x_opcode_nonincr(0, 1);
-    cmd[i++] = _syncpt | (1 << 8);
+    cmd[i++] = _syncpt | (1 << (is41 ? 10 : 8));
 
     drm_tegra_syncpt incr;
     incr.id = _syncpt;
