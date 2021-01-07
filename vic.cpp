@@ -32,7 +32,7 @@
 #include "vic04.h"
 #include "host1x.h"
 #include <libdrm/drm.h>
-#include <libdrm/tegra_drm.h>
+#include "tegra_drm.h"
 
 /*
  * Rec.601 YCbCr to RGB transform matrix. First three columns specify standard
@@ -110,24 +110,24 @@ void VicOp::setClear(float r, float g, float b) {
 }
 
 VicDevice::VicDevice(DrmDevice &dev)
-: _dev(dev), _cmd_bo(dev), _config_bo(dev), _filter_bo(dev)
+: _dev(dev), _cmd_bo(dev), _config_bo(dev), _filter_bo(dev), _syncpt(0xffffffff), _context(0)
 {
 }
 
 VicDevice::~VicDevice() {
-    if (_context) {
-        struct drm_tegra_close_channel close_channel_args;
-        close_channel_args.context = _context;
-
-        _dev.ioctl(DRM_IOCTL_TEGRA_CLOSE_CHANNEL, &close_channel_args);
-    }
+    if (_syncpt != 0xffffffff)
+        _dev.free_syncpoint(_syncpt);
+    if (_context)
+        _dev.close_channel(_context);
 }
 
 int VicDevice::open() {
-    struct drm_tegra_open_channel open_channel_args;
     char tmp[30] = {0};
     FILE *fp;
     int err;
+
+    if (_context)
+        return 0;
 
     fp = fopen("/sys/devices/soc0/soc_id", "r");
     if (!fp) {
@@ -147,16 +147,11 @@ int VicDevice::open() {
 
     fclose(fp);
 
-    memset(&open_channel_args, 0, sizeof(open_channel_args));
-    open_channel_args.client = HOST1X_CLASS_VIC;
-
-    err = _dev.ioctl(DRM_IOCTL_TEGRA_OPEN_CHANNEL, &open_channel_args);
+    err = _dev.open_channel(HOST1X_CLASS_VIC, &_context);
     if (err == -1) {
         perror("Channel open failed");
         return err;
     }
-
-    _context = open_channel_args.context;
 
     err = _cmd_bo.allocate(128);
     if (err)
@@ -166,22 +161,23 @@ int VicDevice::open() {
     if (err)
         return err;
 
+    err = _config_bo.channelMap(_context, false);
+    if (err)
+        return err;
+
     err = _filter_bo.allocate(0x3000);
     if (err)
         return err;
 
-    struct drm_tegra_get_syncpt get_syncpt_args;
-    memset(&get_syncpt_args, 0, sizeof(get_syncpt_args));
-    get_syncpt_args.context = _context;
-    get_syncpt_args.index = 0;
+    err = _filter_bo.channelMap(_context, false);
+    if (err)
+        return err;
 
-    err = _dev.ioctl(DRM_IOCTL_TEGRA_GET_SYNCPT, &get_syncpt_args);
+    err = _dev.allocate_syncpoint(_context, &_syncpt);
     if (err == -1) {
         perror("Syncpt get failed");
         return err;
     }
-
-    _syncpt = get_syncpt_args.id;
 
     return 0;
 }
@@ -192,6 +188,7 @@ int VicDevice::run(VicOp &op)
     ConfigStruct_VIC41 *c = (ConfigStruct_VIC41 *)_config_bo.map();
     uint32_t *cmd = (uint32_t *)_cmd_bo.map();
     std::vector<drm_tegra_reloc> relocs;
+    std::vector<drm_tegra_submit_buf> relocs_new;
     bool is41 = _version == Version::Vic4_1;
 
     if (!c || !cmd)
@@ -260,7 +257,20 @@ int VicDevice::run(VicOp &op)
     cmd[i++] = (name) >> 2;\
     cmd[i++] = (value);\
 } while (0);
-#define BO(h, offs) do {\
+#define BO(h, offs, rw) do {\
+    err = (h)->channelMap(_context, (rw));\
+    if (err) {\
+        perror("Surface mapping failed");\
+        return err;\
+    }\
+    \
+    drm_tegra_submit_buf __buf = { 0 };\
+    __buf.mapping_id = (h)->mappingId();\
+    __buf.reloc.target_offset = (offs);\
+    __buf.reloc.gather_offset_words = i-1;\
+    __buf.reloc.shift = 8;\
+    relocs_new.push_back(__buf);\
+    \
     drm_tegra_reloc __reloc;\
     __reloc.cmdbuf.handle = _cmd_bo.handle();\
     __reloc.cmdbuf.offset = (i-1)*4;\
@@ -274,62 +284,78 @@ int VicDevice::run(VicOp &op)
     M(NVB0B6_VIDEO_COMPOSITOR_SET_CONTROL_PARAMS,
         ((is41 ? sizeof(ConfigStruct_VIC41) : sizeof(ConfigStruct_VIC40)) / 16) << 16);
     M(NVB0B6_VIDEO_COMPOSITOR_SET_CONFIG_STRUCT_OFFSET, 0xdeadbeef);
-    BO(&_config_bo, 0);
+    BO(&_config_bo, 0, false);
     M(NVB0B6_VIDEO_COMPOSITOR_SET_FILTER_STRUCT_OFFSET, 0xdeadbeef);
-    BO(&_filter_bo, 0);
+    BO(&_filter_bo, 0, false);
     M(NVB0B6_VIDEO_COMPOSITOR_SET_OUTPUT_SURFACE_LUMA_OFFSET, 0xdeadbeef);
-    BO(op.output().bo, 0);
+    BO(op.output().bo, 0, true);
 
     if (in0.bo) {
         M(is41 ? NVB1B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_LUMA_OFFSET
                : NVB0B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_LUMA_OFFSET,
             0xdeadbeef);
-        BO(in0.bo, 0);
+        BO(in0.bo, 0, false);
 
         M(is41 ? NVB1B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_CHROMA_U_OFFSET
                : NVB0B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_CHROMA_U_OFFSET,
                0xdeadbeef);
-        BO(in0.bo, in0.pitch * in0.height);
+        BO(in0.bo, in0.pitch * in0.height, false);
     }
 
     M(NVB0B6_VIDEO_COMPOSITOR_EXECUTE, (1 << 8));
     cmd[i++] = host1x_opcode_nonincr(0, 1);
     cmd[i++] = _syncpt | (1 << (is41 ? 10 : 8));
 
-    drm_tegra_syncpt incr;
-    incr.id = _syncpt;
-    incr.incrs = 1;
+    if (_dev.isNewApi()) {
+        drm_tegra_submit_cmd submit_cmds[1] = { 0 };
+        submit_cmds[0].type = DRM_TEGRA_SUBMIT_CMD_GATHER_UPTR;
+        submit_cmds[0].gather_uptr.words = i;
 
-    drm_tegra_cmdbuf cmdbuf;
-    cmdbuf.handle = _cmd_bo.handle();
-    cmdbuf.offset = 0;
-    cmdbuf.words = i;
+        drm_tegra_channel_submit submit = { 0 };
+        submit.channel_ctx = _context;
+        submit.num_bufs = relocs_new.size();
+        submit.num_cmds = 1;
+        submit.gather_data_words = i;
+        submit.bufs_ptr = (__u64)&relocs_new[0];
+        submit.cmds_ptr = (__u64)&submit_cmds[0];
+        submit.gather_data_ptr = (__u64)&cmd[0];
+        submit.syncpt_incr.syncpt_fd = _dev.syncpointFd(_syncpt);
+        submit.syncpt_incr.num_incrs = 1;
 
-    drm_tegra_submit submit;
-    memset(&submit, 0, sizeof(submit));
-    submit.context = _context;
-    submit.num_syncpts = 1;
-    submit.num_cmdbufs = 1;
-    submit.num_relocs = relocs.size();
-    submit.syncpts = (uintptr_t)&incr;
-    submit.cmdbufs = (uintptr_t)&cmdbuf;
-    submit.relocs = (uintptr_t)&relocs[0];
+        err = _dev.ioctl(DRM_IOCTL_TEGRA_CHANNEL_SUBMIT, &submit);
+        if (err == -1) {
+            perror("Submit failed");
+            return err;
+        }
 
-    err = _dev.ioctl(DRM_IOCTL_TEGRA_SUBMIT, &submit);
-    if (err == -1) {
-        perror("Submit failed");
-        return err;
-    }
+        return _dev.waitSyncpoint(_syncpt, submit.syncpt_incr.fence_value);
+    } else {
+        drm_tegra_syncpt incr;
+        incr.id = _syncpt;
+        incr.incrs = 1;
 
-    struct drm_tegra_syncpt_wait syncpt_wait_args;
-    syncpt_wait_args.id = _syncpt;
-    syncpt_wait_args.thresh = submit.fence;
-    syncpt_wait_args.timeout = 2000;
+        drm_tegra_cmdbuf cmdbuf;
+        cmdbuf.handle = _cmd_bo.handle();
+        cmdbuf.offset = 0;
+        cmdbuf.words = i;
 
-    err = _dev.ioctl(DRM_IOCTL_TEGRA_SYNCPT_WAIT, &syncpt_wait_args);
-    if (err == -1) {
-        perror("Syncpt wait failed");
-        return err;
+        drm_tegra_submit submit;
+        memset(&submit, 0, sizeof(submit));
+        submit.context = _context;
+        submit.num_syncpts = 1;
+        submit.num_cmdbufs = 1;
+        submit.num_relocs = relocs.size();
+        submit.syncpts = (uintptr_t)&incr;
+        submit.cmdbufs = (uintptr_t)&cmdbuf;
+        submit.relocs = (uintptr_t)&relocs[0];
+
+        err = _dev.ioctl(DRM_IOCTL_TEGRA_SUBMIT, &submit);
+        if (err == -1) {
+            perror("Submit failed");
+            return err;
+        }
+
+        return _dev.waitSyncpoint(_syncpt, submit.fence);
     }
 
     return 0;

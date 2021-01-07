@@ -229,8 +229,7 @@ FUNC(PutSurface, VASurfaceID surface, void* draw, short srcx, short srcy,
     GemBuffer buffer(device);
     buffer.openByName(dri_buffer->dri2.name);
 
-    VicDevice vic(device);
-    if (vic.open())
+    if (DRIVER_DATA->vic->open())
         return VA_STATUS_ERROR_OPERATION_FAILED;
 
     VicOp op;
@@ -254,7 +253,7 @@ FUNC(PutSurface, VASurfaceID surface, void* draw, short srcx, short srcy,
     op.setOutput(op_out);
     op.setSurface(0, op_in);
 
-    vic.run(op);
+    DRIVER_DATA->vic->run(op);
 
     va_dri_swap_buffer(ctx, dri_drawable);
 

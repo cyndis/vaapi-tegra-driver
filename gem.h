@@ -27,6 +27,8 @@
 #include <libdrm/drm.h>
 #include <xf86drm.h>
 
+#include <map>
+
 class DrmDevice {
 public:
     DrmDevice();
@@ -34,11 +36,25 @@ public:
     ~DrmDevice();
 
     int ioctl(int request, void *ptr);
+    int host_ioctl(int request, void *ptr);
 
     int fd() const { return _fd; }
 
+    int open_channel(uint32_t cl, uint64_t *context);
+    int close_channel(uint64_t context);
+    int allocate_syncpoint(uint64_t context, uint32_t *syncpt);
+    void free_syncpoint(uint32_t syncpt);
+
+    bool isNewApi() const { return _new_api; }
+    int syncpointFd(uint32_t id) { return _syncpt_fds[id]; }
+
+    int waitSyncpoint(uint32_t id, uint32_t threshold);
+
 private:
-    int _fd;
+    int _fd, _host_fd;
+    bool _new_api;
+
+    std::map<uint32_t, int> _syncpt_fds;
 };
 
 typedef uint32_t gem_handle;
@@ -52,9 +68,11 @@ public:
     int allocate(size_t bytes);
     int openByName(uint32_t name);
     void *map();
+    int channelMap(uint32_t channel_ctx, bool readwrite);
 
     gem_handle handle() const { return _handle; }
     size_t size() const { return _size; }
+    uint32_t mappingId() const { return _mapping_id; }
 
 private:
     DrmDevice &_dev;
@@ -64,6 +82,8 @@ private:
     size_t _size;
 
     void *_map;
+
+    uint32_t _mapping_id;
 };
 
 #endif // GEM_H
