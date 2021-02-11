@@ -4,9 +4,9 @@ project(vicva)
 find_package(PkgConfig)
 pkg_search_module(DRM REQUIRED libdrm)
 
-add_library(tegra_drv_video MODULE main.cpp objects.cpp gem.cpp vic.cpp)
+add_library(tegra_drv_video MODULE main.cpp objects.cpp gem.cpp engines/vic.cpp engines/nvdec.cpp)
 set_target_properties(tegra_drv_video PROPERTIES PREFIX "")
-set_target_properties(tegra_drv_video PROPERTIES CXX_STANDARD 14)
+set_target_properties(tegra_drv_video PROPERTIES CXX_STANDARD 17)
 set_target_properties(tegra_drv_video PROPERTIES CXX_STANDARD_REQUIRED ON)
 
 target_link_libraries(tegra_drv_video ${DRM_LIBRARIES})

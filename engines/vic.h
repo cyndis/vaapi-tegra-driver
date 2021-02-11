@@ -24,8 +24,8 @@
 #ifndef VIC_H
 #define VIC_H
 
-#include "drm.h"
-#include "gem.h"
+#include <linux/kernel.h>
+#include "../gem.h"
 
 class VicOp {
 public:
@@ -38,6 +38,12 @@ public:
         // All in pixels
         unsigned int x, y;
         unsigned int width, height, pitch;
+        uint32_t fourcc;
+        uint64_t format;
+
+        unsigned int paddedHeight() const {
+            return __ALIGN_KERNEL(height, 16);
+        }
     };
 
     VicOp();
@@ -48,9 +54,9 @@ public:
 
     const VicOp::Surface &output() const { return _output; }
     const VicOp::Surface &input(unsigned int idx) const { return _inputs[idx]; }
-    const float clearR() const { return _clear_r; }
-    const float clearG() const { return _clear_g; }
-    const float clearB() const { return _clear_b; }
+    float clearR() const { return _clear_r; }
+    float clearG() const { return _clear_g; }
+    float clearB() const { return _clear_b; }
 
 private:
     VicOp::Surface _output;

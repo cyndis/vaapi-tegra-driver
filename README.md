@@ -1,10 +1,13 @@
 # vaapi-tegra-driver
 
 A VAAPI backend driver for NVIDIA Tegra SoC's, based on multimedia units accessed through Host1x.
+This driver is experimental, don't expect it to work in every situation or with adequate performance
+at this point.
 
 Currently supported features:
 
 - NV12 to RGB colorspace conversion
+- MPEG2 decoding
 - X11/DRI2 surface presentation
 
 Currently supported SoC's:
@@ -36,8 +39,8 @@ Testing:
 export LIBVA_DRIVERS_PATH=<build directory>
 export LIBVA_DRIVER_NAME=tegra
 
-cd <libva path>/test/putsurface
-./putsurface
+# MPEG2 decoding
+mpv --hwdec=vaapi-copy --hwdec-codecs=all video.m2v
 ```
 
 ## Contributing

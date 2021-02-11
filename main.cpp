@@ -25,11 +25,16 @@
 #include <cstdint>
 #include <cstring>
 
+#include <libdrm/drm_fourcc.h>
 #include <va/va_backend.h>
+#include <linux/kernel.h>
 
 #include "objects.h"
+#include "buffer.h"
+#include "context.h"
 #include "gem.h"
-#include "vic.h"
+
+#include "engines/vic.h"
 
 extern "C" {
     #include <va/va_dricommon.h>
@@ -44,11 +49,13 @@ struct DriverData {
     Objects objects;
     DrmDevice *drm;
     VicDevice *vic;
+    NvdecDevice *nvdec;
 };
 
 FUNC(Terminate)
 {
     DRIVER_DATA->objects.clear();
+    delete DRIVER_DATA->nvdec;
     delete DRIVER_DATA->vic;
     delete DRIVER_DATA->drm;
 
@@ -61,7 +68,8 @@ FUNC(Terminate)
 
 FUNC(QueryConfigProfiles, VAProfile *profile_list, int *num_profiles)
 {
-    *num_profiles = 0;
+    profile_list[0] = VAProfileMPEG2Main;
+    *num_profiles = 1;
 
     return VA_STATUS_SUCCESS;
 }
@@ -69,7 +77,17 @@ FUNC(QueryConfigProfiles, VAProfile *profile_list, int *num_profiles)
 FUNC(QueryConfigEntrypoints, VAProfile profile, VAEntrypoint *entrypoint_list,
      int *num_entrypoints)
 {
-    *num_entrypoints = 0;
+    switch (profile) {
+    case VAProfileMPEG2Main:
+        entrypoint_list[0] = VAEntrypointVLD;
+
+        *num_entrypoints = 1;
+
+        break;
+
+    default:
+        *num_entrypoints = 0;
+    }
 
     return VA_STATUS_SUCCESS;
 }
@@ -77,18 +95,44 @@ FUNC(QueryConfigEntrypoints, VAProfile profile, VAEntrypoint *entrypoint_list,
 FUNC(GetConfigAttributes, VAProfile profile, VAEntrypoint entrypoint,
      VAConfigAttrib *attrib_list, int num_attribs)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    int i;
+
+    if (profile != VAProfileMPEG2Main)
+        return VA_STATUS_ERROR_INVALID_VALUE;
+
+    if (entrypoint != VAEntrypointVLD)
+        return VA_STATUS_ERROR_INVALID_VALUE;
+
+    for (i = 0; i < num_attribs; i++) {
+        switch (attrib_list[i].type) {
+        case VAConfigAttribRTFormat:
+            attrib_list[i].value = VA_RT_FORMAT_YUV420;
+            break;
+        default:
+            attrib_list[i].value = VA_ATTRIB_NOT_SUPPORTED;
+        }
+    }
+
+    return VA_STATUS_SUCCESS;
 }
 
 FUNC(CreateConfig, VAProfile profile, VAEntrypoint entrypoint,
      VAConfigAttrib *attrib_list, int num_attribs, VAConfigID *config_id)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    if (profile != VAProfileMPEG2Main)
+        return VA_STATUS_ERROR_INVALID_VALUE;
+
+    if (entrypoint != VAEntrypointVLD)
+        return VA_STATUS_ERROR_INVALID_VALUE;
+
+    *config_id = 1001;
+
+    return VA_STATUS_SUCCESS;
 }
 
 FUNC(DestroyConfig, VAConfigID config_id)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    return VA_STATUS_SUCCESS;
 }
 
 FUNC(QueryConfigAttributes, VAConfigID config_id, VAProfile *profile,
@@ -98,20 +142,22 @@ FUNC(QueryConfigAttributes, VAConfigID config_id, VAProfile *profile,
 }
 
 /* TODO destroy already created surfaces on error */
-FUNC(CreateSurfaces, int width, int height, int format, int num_surfaces,
-     VASurfaceID *surfaces)
+FUNC(CreateSurfaces2, unsigned int format, unsigned int width, unsigned int height,
+    VASurfaceID *surfaces, unsigned int num_surfaces, VASurfaceAttrib *attrib_list,
+    unsigned int num_attribs)
 {
     int i, err;
+    unsigned padded_height = __ALIGN_KERNEL(height, 16);
 
-    for (i = 0; i < num_surfaces; ++i) {
-        int pitch = 512;
+    for (i = 0; i < (int)num_surfaces; ++i) {
+        int pitch = __ALIGN_KERNEL(width, 256);
 
         Surface *surface = DRIVER_DATA->objects.createSurface(&surfaces[i]);
         surface->width = width;
         surface->height = height;
         surface->pitch = pitch;
 
-        size_t size = (pitch * height) + 2 * ((pitch/2) * (height)/2);
+        size_t size = (pitch * padded_height) + (pitch * padded_height / 2);
 
         auto gem = std::make_unique<GemBuffer>(*DRIVER_DATA->drm);
         err = gem->allocate(size);
@@ -119,6 +165,8 @@ FUNC(CreateSurfaces, int width, int height, int format, int num_surfaces,
             return VA_STATUS_ERROR_ALLOCATION_FAILED;
 
         Buffer *buffer = DRIVER_DATA->objects.createBuffer(&surface->buffer);
+        buffer->has_gem = true;
+        buffer->type = VABufferTypeMax;
         buffer->gem = std::move(gem);
 
         switch (format) {
@@ -133,27 +181,89 @@ FUNC(CreateSurfaces, int width, int height, int format, int num_surfaces,
     return VA_STATUS_SUCCESS;
 }
 
+FUNC(CreateSurfaces, int width, int height, int format, int num_surfaces, VASurfaceID *surfaces)
+{
+    return tegra_CreateSurfaces2(ctx, format, width, height, surfaces, num_surfaces, nullptr, 0);
+}
+
+FUNC(ExportSurfaceHandle, VASurfaceID surface_id, uint32_t mem_type, uint32_t flags,
+    void *descriptor)
+{
+    Surface *surface = DRIVER_DATA->objects.surface(surface_id);
+    if (!surface)
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+
+    Buffer *buffer = DRIVER_DATA->objects.buffer(surface->buffer);
+
+    if (mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2)
+        return VA_STATUS_ERROR_UNIMPLEMENTED;
+
+    VADRMPRIMESurfaceDescriptor desc;
+
+    desc.fourcc = VA_FOURCC_NV12;
+    desc.width = surface->width;
+    desc.height = surface->height;
+
+    desc.num_objects = 1;
+    desc.objects[0].fd = buffer->gem->exportFd((flags & VA_EXPORT_SURFACE_WRITE_ONLY) != 0);
+    if (desc.objects[0].fd == -1)
+        return VA_STATUS_ERROR_UNKNOWN;
+    desc.objects[0].size = buffer->gem->size();
+    desc.objects[0].drm_format_modifier = DRM_FORMAT_NV12;
+
+    desc.num_layers = 2;
+    desc.layers[0].drm_format = DRM_FORMAT_R8;
+    desc.layers[0].num_planes = 1;
+    desc.layers[0].object_index[0] = 0;
+    desc.layers[0].offset[0] = 0;
+    desc.layers[0].pitch[0] = surface->pitch;
+    desc.layers[1].drm_format = DRM_FORMAT_GR88;
+    desc.layers[1].num_planes = 1;
+    desc.layers[1].object_index[0] = 0;
+    desc.layers[1].offset[0] = surface->pitch * __ALIGN_KERNEL(surface->height, 16);
+    desc.layers[1].pitch[0] = surface->pitch;
+
+    *(VADRMPRIMESurfaceDescriptor *)descriptor = desc;
+
+    return VA_STATUS_SUCCESS;
+}
+
 FUNC(DestroySurfaces, VASurfaceID *surface_list, int num_surfaces)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    return VA_STATUS_SUCCESS;
 }
 
 FUNC(CreateContext, VAConfigID config_id, int picture_width, int picture_height,
      int flag, VASurfaceID *render_targets, int num_render_targets,
-     VAContextID *context)
+     VAContextID *context_id)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    Context *context = DRIVER_DATA->objects.createContext(context_id);
+    if (!context)
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+
+    return VA_STATUS_SUCCESS;
 }
 
 FUNC(DestroyContext, VAContextID context)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    return VA_STATUS_SUCCESS;
 }
 
 FUNC(CreateBuffer, VAContextID context, VABufferType type, unsigned int size,
      unsigned int num_elements, void *data, VABufferID *buf_id)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    Buffer *buffer = DRIVER_DATA->objects.createBuffer(buf_id);
+    if (!buffer)
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+
+    buffer->type = type;
+    buffer->has_gem = false;
+    buffer->data.resize(size * num_elements);
+
+    if (data)
+        memcpy(buffer->data.data(), data, size * num_elements);
+
+    return VA_STATUS_SUCCESS;
 }
 
 FUNC(BufferSetNumElements, VABufferID buf_id, unsigned int num_elements)
@@ -165,46 +275,237 @@ FUNC(MapBuffer, VABufferID buf_id, void **pbuf)
 {
     Buffer *buffer = DRIVER_DATA->objects.buffer(buf_id);
 
-    *pbuf = buffer->gem->map();
-    if (*pbuf)
+    if (buffer->has_gem) {
+        *pbuf = buffer->gem->map();
+        if (*pbuf)
+            return VA_STATUS_SUCCESS;
+        else
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+    } else {
+        *pbuf = buffer->data.data();
         return VA_STATUS_SUCCESS;
-    else
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
 }
 
 FUNC(UnmapBuffer, VABufferID buf_id)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    return VA_STATUS_SUCCESS;
 }
 
 FUNC(DestroyBuffer, VABufferID buffer_id)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    return VA_STATUS_SUCCESS;
 }
 
-FUNC(BeginPicture, VAContextID context, VASurfaceID render_target)
+FUNC(BeginPicture, VAContextID context_id, VASurfaceID render_target)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    Context *context = DRIVER_DATA->objects.context(context_id);
+    if (!context)
+        return VA_STATUS_ERROR_INVALID_CONTEXT;
+
+    Surface *surface = DRIVER_DATA->objects.surface(render_target);
+    if (!surface)
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+
+    Buffer *surf_buffer = DRIVER_DATA->objects.buffer(surface->buffer);
+
+    NvdecOp::Surface output_surface;
+    output_surface.bo = surf_buffer->gem.get();
+    output_surface.width = surface->width;
+    output_surface.height = surface->height;
+    output_surface.pitch = surface->pitch;
+
+    /* TODO will need temp surface to unswizzle */
+
+    context->op.setOutput(output_surface);
+    context->op.setSliceData(nullptr);
+    context->op.setSliceDataLength(0);
+    context->op.setSliceDataOffsets(nullptr);
+    context->op.setForwardReference(nullptr);
+    context->op.setBackwardReference(nullptr);
+    context->num_slices = 0;
+    context->total_slice_size = 0;
+
+    return VA_STATUS_SUCCESS;
 }
 
-FUNC(RenderPicture, VAContextID context, VABufferID *buffers, int num_buffers)
+const uint8_t termination_sequence[16] = {
+    0x00, 0x00, 0x01, 0xB7, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x01, 0xB7, 0x00, 0x00, 0x00, 0x00
+};
+
+FUNC(RenderPicture, VAContextID context_id, VABufferID *buffers, int num_buffers)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    int i;
+
+    Context *context = DRIVER_DATA->objects.context(context_id);
+    if (!context)
+        return VA_STATUS_ERROR_INVALID_CONTEXT;
+
+    uint32_t total_slice_size = sizeof(termination_sequence);
+    uint32_t num_slices = 0;
+    for (i = 0; i < num_buffers; i++) {
+        Buffer *buffer = DRIVER_DATA->objects.buffer(buffers[i]);
+        if (!buffer)
+            return VA_STATUS_ERROR_INVALID_BUFFER;
+
+        if (buffer->type != VASliceParameterBufferType)
+            continue;
+
+        auto *buff = (VASliceParameterBufferMPEG2 *)buffer->data.data();
+
+        total_slice_size += buff->slice_data_size;
+        if ((buff->slice_data_flag == VA_SLICE_DATA_FLAG_ALL) ||
+                (buff->slice_data_flag & VA_SLICE_DATA_FLAG_BEGIN))
+            num_slices++;
+
+        if (buff->slice_data_flag != VA_SLICE_DATA_FLAG_ALL) {
+            printf("Partial slice!!\n");
+        }
+    }
+
+    if (num_slices > 0) {
+        context->num_slices = num_slices;
+        context->total_slice_size = total_slice_size;
+
+        if (!context->slice_data.get() || context->slice_data->size() < total_slice_size) {
+            auto slice_size = __ALIGN_KERNEL(total_slice_size, 0x10000);
+
+            context->slice_data.reset();
+
+            auto gem = std::make_unique<GemBuffer>(*DRIVER_DATA->drm);
+            int err = gem->allocate(slice_size);
+            if (err)
+                return VA_STATUS_ERROR_ALLOCATION_FAILED;
+
+            context->slice_data = std::move(gem);
+        }
+
+        memset(context->slice_data->map(), 0, context->slice_data->size());
+
+        if (!context->slice_data_offsets.get() || context->slice_data_offsets->size() < num_slices*4) {
+            auto size = __ALIGN_KERNEL((num_slices+1)*4, 0x1000);
+
+            context->slice_data_offsets.reset();
+
+            auto gem = std::make_unique<GemBuffer>(*DRIVER_DATA->drm);
+            int err = gem->allocate(size);
+            if (err)
+                return VA_STATUS_ERROR_ALLOCATION_FAILED;
+
+            context->slice_data_offsets = std::move(gem);
+        }
+
+        memset(context->slice_data_offsets->map(), 0, context->slice_data_offsets->size());
+    }
+
+    uint32_t current_slice_data_offset = 0;
+    uint32_t current_slice_idx = 0;
+    VASliceParameterBufferMPEG2 current_slice_param;
+
+    for (i = 0; i < num_buffers; i++) {
+        Buffer *buffer = DRIVER_DATA->objects.buffer(buffers[i]);
+        if (!buffer)
+            return VA_STATUS_ERROR_INVALID_BUFFER;
+
+        switch (buffer->type) {
+        case VAPictureParameterBufferType: {
+            auto *buff = (VAPictureParameterBufferMPEG2 *)buffer->data.data();
+            context->op.setPictureParameters(*buff);
+
+            if (buff->forward_reference_picture != VA_INVALID_ID) {
+                Surface *forward_reference =
+                    DRIVER_DATA->objects.surface(buff->forward_reference_picture);
+                if (!forward_reference)
+                    return VA_STATUS_ERROR_INVALID_SURFACE;
+
+                Buffer *forward_buffer = DRIVER_DATA->objects.buffer(forward_reference->buffer);
+
+                context->op.setForwardReference(forward_buffer->gem.get());
+            }
+
+            if (buff->backward_reference_picture != VA_INVALID_ID) {
+                Surface *backward_reference =
+                    DRIVER_DATA->objects.surface(buff->backward_reference_picture);
+                if (!backward_reference)
+                    return VA_STATUS_ERROR_INVALID_SURFACE;
+
+                Buffer *backward_buffer = DRIVER_DATA->objects.buffer(backward_reference->buffer);
+
+                context->op.setBackwardReference(backward_buffer->gem.get());
+            }
+
+            break;
+        }
+        case VAIQMatrixBufferType:
+            context->op.setIQMatrix(*(VAIQMatrixBufferMPEG2 *)buffer->data.data());
+            break;
+        case VASliceParameterBufferType: {
+            auto *buff = (VASliceParameterBufferMPEG2 *)buffer->data.data();
+            current_slice_param = *buff;
+
+            break;
+        }
+        case VASliceDataBufferType: {
+            uint32_t *offs_ptr = (uint32_t *)context->slice_data_offsets->map();
+            *(offs_ptr + current_slice_idx++) = current_slice_data_offset;
+
+            uint8_t *ptr = (uint8_t *)context->slice_data->map();
+            memcpy(ptr + current_slice_data_offset,
+                buffer->data.data() + current_slice_param.slice_data_offset,
+                current_slice_param.slice_data_size);
+
+            current_slice_data_offset += current_slice_param.slice_data_size;
+
+            break;
+        }
+        default:
+            printf("WARNING: Trying to use unknown buffer type %u for rendering\n", buffer->type);
+            break;
+        }
+    }
+
+    if (num_slices > 0) {
+        uint8_t *ptr = (uint8_t *)context->slice_data->map();
+        memcpy(ptr + current_slice_data_offset, termination_sequence, sizeof(termination_sequence));
+
+        uint32_t *offs_ptr = (uint32_t *)context->slice_data_offsets->map();
+        *(offs_ptr + current_slice_idx) = current_slice_data_offset;
+    }
+
+    return VA_STATUS_SUCCESS;
 }
 
-FUNC(EndPicture, VAContextID context)
+FUNC(EndPicture, VAContextID context_id)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    Context *context = DRIVER_DATA->objects.context(context_id);
+    if (!context)
+        return VA_STATUS_ERROR_INVALID_CONTEXT;
+
+    if (DRIVER_DATA->nvdec->open())
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+
+    context->op.setSliceData(context->slice_data.get());
+    context->op.setSliceDataOffsets(context->slice_data_offsets.get());
+    context->op.setSliceDataLength(context->total_slice_size);
+    context->op.setNumSlices(context->num_slices);
+
+    if (DRIVER_DATA->nvdec->run(context->op))
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+
+    return VA_STATUS_SUCCESS;
 }
 
 FUNC(SyncSurface, VASurfaceID render_target)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    return VA_STATUS_SUCCESS;
 }
 
 FUNC(QuerySurfaceStatus, VASurfaceID render_target, VASurfaceStatus *status)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    *status = VASurfaceReady;
+
+    return VA_STATUS_SUCCESS;
 }
 
 FUNC(QuerySurfaceError, VASurfaceID render_target, VAStatus error_status,
@@ -239,6 +540,8 @@ FUNC(PutSurface, VASurfaceID surface, void* draw, short srcx, short srcy,
     op_out.width = destw;
     op_out.height = desth;
     op_out.pitch = dri_buffer->dri2.pitch / 4;
+    op_out.fourcc = DRM_FORMAT_ARGB8888;
+    op_out.format = DRM_FORMAT_MOD_LINEAR;
 
     Surface *sf = DRIVER_DATA->objects.surface(surface);
     VicOp::Surface op_in;
@@ -248,6 +551,8 @@ FUNC(PutSurface, VASurfaceID surface, void* draw, short srcx, short srcy,
     op_in.width = srcw;
     op_in.height = srch;
     op_in.pitch = sf->pitch;
+    op_in.fourcc = DRM_FORMAT_NV12;
+    op_in.format = DRM_FORMAT_MOD_LINEAR;
 
     op.setClear(0.0, 1.0, 0.0);
     op.setOutput(op_out);
@@ -262,12 +567,42 @@ FUNC(PutSurface, VASurfaceID surface, void* draw, short srcx, short srcy,
 
 FUNC(QueryImageFormats, VAImageFormat *format_list, int *num_formats)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    format_list[0].fourcc = VA_FOURCC_NV12;
+    format_list[0].byte_order = VA_LSB_FIRST;
+    format_list[0].bits_per_pixel = 24;
+
+    *num_formats = 1;
+
+    return VA_STATUS_SUCCESS;
 }
 
-FUNC(CreateImage, VAImageFormat *format, int width, int height, VAImage *image)
+FUNC(CreateImage, VAImageFormat *format, int width, int height, VAImage *image_data)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    Image *image = DRIVER_DATA->objects.createImage(&image_data->image_id);
+    Buffer *buffer = DRIVER_DATA->objects.createBuffer(&image_data->buf);
+
+    image_data->format = *format;
+    image_data->width = width;
+    image_data->height = height;
+    image_data->data_size = width * height * 3;
+    image_data->num_planes = 2;
+    image_data->pitches[0] = __ALIGN_KERNEL(width, 256);
+    image_data->pitches[1] = __ALIGN_KERNEL(width, 256);
+    image_data->offsets[0] = 0;
+    image_data->offsets[1] = image_data->pitches[0] * __ALIGN_KERNEL(height, 16);
+    image_data->num_palette_entries = 0;
+    image_data->entry_bytes = 0;
+
+    auto gem = std::make_unique<GemBuffer>(*DRIVER_DATA->drm);
+    int err = gem->allocate(image_data->data_size);
+    if (err)
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    buffer->has_gem = true;
+    buffer->gem = std::move(gem);
+
+    image->buffer = buffer;
+
+    return VA_STATUS_SUCCESS;
 }
 
 FUNC(DeriveImage, VASurfaceID surface, VAImage *image)
@@ -276,6 +611,7 @@ FUNC(DeriveImage, VASurfaceID surface, VAImage *image)
 
     image->format.fourcc = s->format;
     image->buf = s->buffer;
+    image->image_id = 0;
 
     image->width = s->width;
     image->height = s->height;
@@ -287,8 +623,8 @@ FUNC(DeriveImage, VASurfaceID surface, VAImage *image)
     image->pitches[2] = s->pitch;
 
     image->offsets[0] = 0;
-    image->offsets[1] = s->pitch * s->height;
-    image->offsets[2] = s->pitch * s->height + 1;
+    image->offsets[1] = s->pitch * __ALIGN_KERNEL(s->height, 16);
+    image->offsets[2] = s->pitch * __ALIGN_KERNEL(s->height, 16) + 1;
 
     image->num_palette_entries = 0;
     image->entry_bytes = 0;
@@ -296,9 +632,19 @@ FUNC(DeriveImage, VASurfaceID surface, VAImage *image)
     return VA_STATUS_SUCCESS;
 }
 
-FUNC(DestroyImage, VAImageID image)
+FUNC(DestroyImage, VAImageID image_id)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    if (image_id == 0)
+        return VA_STATUS_SUCCESS;
+
+    Image *image = DRIVER_DATA->objects.image(image_id);
+
+    if (!image)
+        return VA_STATUS_ERROR_INVALID_IMAGE;
+
+    delete image->buffer->gem.release();
+
+    return VA_STATUS_SUCCESS;
 }
 
 FUNC(SetImagePalette, VAImageID image, unsigned char *palette)
@@ -306,10 +652,51 @@ FUNC(SetImagePalette, VAImageID image, unsigned char *palette)
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
 
-FUNC(GetImage, VASurfaceID surface, int x, int y, unsigned int width,
-     unsigned int height, VAImageID image)
+FUNC(GetImage, VASurfaceID surface_id, int x, int y, unsigned int width,
+     unsigned int height, VAImageID image_id)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    Surface *surface = DRIVER_DATA->objects.surface(surface_id);
+    if (!surface)
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+
+    Image *image = DRIVER_DATA->objects.image(image_id);
+    if (!image)
+        return VA_STATUS_ERROR_INVALID_IMAGE;
+
+    Buffer *surface_buffer = DRIVER_DATA->objects.buffer(surface->buffer);
+
+    void *surface_map = surface_buffer->gem->map();
+    void *image_map = image->buffer->gem->map();
+    if (!surface_map || !image_map)
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+
+    VicOp op;
+
+    VicOp::Surface op_out;
+    op_out.bo = image->buffer->gem.get();
+    op_out.width = surface->width;
+    op_out.height = surface->height;
+    op_out.pitch = surface->pitch;
+    op_out.fourcc = DRM_FORMAT_NV12;
+    op_out.format = DRM_FORMAT_MOD_LINEAR;
+    op.setOutput(op_out);
+
+    VicOp::Surface op_in;
+    op_in.bo = surface_buffer->gem.get();
+    op_in.width = surface->width;
+    op_in.height = surface->height;
+    op_in.pitch = surface->pitch;
+    op_in.fourcc = DRM_FORMAT_NV12;
+    op_in.format = DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK_TWO_GOB;
+    op.setSurface(0, op_in);
+
+    if (DRIVER_DATA->vic->open())
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+
+    if (DRIVER_DATA->vic->run(op))
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+
+    return VA_STATUS_SUCCESS;
 }
 
 FUNC(PutImage, VASurfaceID surface, VAImageID image, int src_x, int src_y,
@@ -389,7 +776,6 @@ FUNC(BufferInfo, VABufferID buf_id, VABufferType *type, unsigned int *size,
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
 
-
 FUNC(LockSurface, VASurfaceID surface, unsigned int *fourcc,
      unsigned int *luma_stride, unsigned int *chroma_u_stride,
      unsigned int *chroma_v_stride, unsigned int *luma_offset,
@@ -404,9 +790,26 @@ FUNC(UnlockSurface, VASurfaceID surface)
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
 
+FUNC(QuerySurfaceAttributes, VAConfigID config, VASurfaceAttrib *attrib_list,
+    unsigned int *num_attribs)
+{
+    if (attrib_list) {
+        attrib_list[0].type = VASurfaceAttribPixelFormat;
+        attrib_list[0].value.type = VAGenericValueTypeInteger;
+        attrib_list[0].value.value.i = VA_FOURCC_NV12;
+        attrib_list[0].flags = VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE;
+    }
+
+    *num_attribs = 1;
+
+    return VA_STATUS_SUCCESS;
+}
+
 extern "C" VAStatus __vaDriverInit_1_0(VADriverContextP ctx)
 {
     struct VADriverVTable * const vtbl = ctx->vtable;
+
+    fprintf(stderr, "\nTegra VIC/NVDEC Driver initializing\n");
 
     ctx->version_major = 0;
     ctx->version_minor = 1;
@@ -416,11 +819,12 @@ extern "C" VAStatus __vaDriverInit_1_0(VADriverContextP ctx)
     ctx->max_image_formats = 1;
     ctx->max_subpic_formats = 1;
     ctx->max_display_attributes = 1;
-    ctx->str_vendor = "Tegra Host1x driver";
+    ctx->str_vendor = "Tegra VIC/NVDEC driver";
 
     DriverData *dd = new DriverData;
     dd->drm = new DrmDevice;
     dd->vic = new VicDevice(*dd->drm);
+    dd->nvdec = new NvdecDevice(*dd->drm);
 
     ctx->pDriverData = (void *)dd;
 
@@ -432,6 +836,8 @@ extern "C" VAStatus __vaDriverInit_1_0(VADriverContextP ctx)
     vtbl->vaDestroyConfig = tegra_DestroyConfig;
     vtbl->vaQueryConfigAttributes = tegra_QueryConfigAttributes;
     vtbl->vaCreateSurfaces = tegra_CreateSurfaces;
+    vtbl->vaCreateSurfaces2 = tegra_CreateSurfaces2;
+    vtbl->vaExportSurfaceHandle = tegra_ExportSurfaceHandle;
     vtbl->vaDestroySurfaces = tegra_DestroySurfaces;
     vtbl->vaCreateContext = tegra_CreateContext;
     vtbl->vaDestroyContext = tegra_DestroyContext;
@@ -468,6 +874,7 @@ extern "C" VAStatus __vaDriverInit_1_0(VADriverContextP ctx)
     vtbl->vaBufferInfo = tegra_BufferInfo;
     vtbl->vaLockSurface = tegra_LockSurface;
     vtbl->vaUnlockSurface = tegra_UnlockSurface;
+    vtbl->vaQuerySurfaceAttributes = tegra_QuerySurfaceAttributes;
 
     return VA_STATUS_SUCCESS;
 }

@@ -24,10 +24,10 @@
 #ifndef GEM_H
 #define GEM_H
 
-#include <libdrm/drm.h>
-#include <xf86drm.h>
-
+#include <cstdint>
 #include <map>
+
+#include <libdrm/drm.h>
 
 class DrmDevice {
 public:
@@ -69,10 +69,11 @@ public:
     int openByName(uint32_t name);
     void *map();
     int channelMap(uint32_t channel_ctx, bool readwrite);
+    int32_t exportFd(bool readwrite);
 
     gem_handle handle() const { return _handle; }
     size_t size() const { return _size; }
-    uint32_t mappingId() const { return _mapping_id; }
+    uint32_t mappingId(uint32_t channel_ctx) const { return _mapping_ids.at(channel_ctx); }
 
 private:
     DrmDevice &_dev;
@@ -83,7 +84,7 @@ private:
 
     void *_map;
 
-    uint32_t _mapping_id;
+    std::map<uint32_t, uint32_t> _mapping_ids;
 };
 
 #endif // GEM_H

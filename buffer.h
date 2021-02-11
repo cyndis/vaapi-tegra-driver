@@ -1,6 +1,6 @@
 /* kate: replace-tabs true; indent-width 4
  *
- * Copyright (c) 2017, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2021, NVIDIA CORPORATION. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -21,63 +21,26 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef OBJECTS_H
-#define OBJECTS_H
-
-#include <mutex>
-#include <vector>
-#include <memory>
+#ifndef BUFFER_H
+#define BUFFER_H
 
 #include <va/va_backend.h>
 
-class Buffer;
-class Context;
+#include "objects.h"
+#include "gem.h"
 
-class Object
+class Buffer : public Object
 {
 public:
-    virtual ~Object() {}
+    Buffer() : type(VABufferTypeMax), has_gem(false) {
+    }
+
+    VABufferType type;
+
+    bool has_gem;
+    std::unique_ptr<GemBuffer> gem;
+
+    std::vector<uint8_t> data;
 };
 
-class Image : public Object
-{
-public:
-    Buffer *buffer;
-};
-
-class Surface : public Object
-{
-public:
-    uint16_t width;
-    uint16_t height;
-    uint16_t pitch;
-    int format;
-    VABufferID buffer;
-};
-
-class Objects
-{
-public:
-    void clear();
-
-    Surface *createSurface(VASurfaceID *id);
-    Surface *surface(VASurfaceID id);
-
-    Buffer *createBuffer(VABufferID *id);
-    Buffer *buffer(VABufferID id);
-
-    Context *createContext(VAContextID *id);
-    Context *context(VAContextID id);
-
-    Image *createImage(VAImageID *id);
-    Image *image(VAImageID id);
-
-private:
-    std::mutex _lock;
-    std::vector<Object *> _objects;
-
-    VAGenericID addGeneric(Object *obj);
-    Object *getGeneric(VAGenericID id);
-};
-
-#endif // OBJECTS_H
+#endif

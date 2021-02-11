@@ -29,10 +29,12 @@
 #include <cerrno>
 
 #include "vic.h"
-#include "vic04.h"
-#include "host1x.h"
+#include "../engine_headers/vic04.h"
+#include "../engine_headers/host1x.h"
 #include <libdrm/drm.h>
-#include "tegra_drm.h"
+#include <libdrm/drm_fourcc.h>
+#include "../uapi_headers/tegra_drm.h"
+#include <linux/kernel.h>
 
 /*
  * Rec.601 YCbCr to RGB transform matrix. First three columns specify standard
@@ -110,7 +112,7 @@ void VicOp::setClear(float r, float g, float b) {
 }
 
 VicDevice::VicDevice(DrmDevice &dev)
-: _dev(dev), _cmd_bo(dev), _config_bo(dev), _filter_bo(dev), _syncpt(0xffffffff), _context(0)
+: _dev(dev), _context(0), _syncpt(0xffffffff), _cmd_bo(dev), _config_bo(dev), _filter_bo(dev)
 {
 }
 
@@ -136,6 +138,7 @@ int VicDevice::open() {
     }
 
     fread(tmp, 1, sizeof(tmp)-1, fp);
+    fclose(fp);
     if (!strcmp(tmp, "33\n"))
         _version = Version::Vic4_0;
     else if (!strcmp(tmp, "24\n"))
@@ -145,15 +148,13 @@ int VicDevice::open() {
         return -1;
     }
 
-    fclose(fp);
-
     err = _dev.open_channel(HOST1X_CLASS_VIC, &_context);
     if (err == -1) {
         perror("Channel open failed");
         return err;
     }
 
-    err = _cmd_bo.allocate(128);
+    err = _cmd_bo.allocate(0x1000);
     if (err)
         return err;
 
@@ -205,14 +206,30 @@ int VicDevice::run(VicOp &op)
     c->outputConfig.BackgroundG = op.clearG() * 1023;
     c->outputConfig.BackgroundB = op.clearB() * 1023;
 
-    c->outputSurfaceConfig.OutPixelFormat = VIC_PIXEL_FORMAT_A8R8G8B8;
-    c->outputSurfaceConfig.OutBlkKind = VIC_BLK_KIND_PITCH;
+    switch (op.output().fourcc) {
+    case DRM_FORMAT_ARGB8888:
+        c->outputSurfaceConfig.OutPixelFormat = VIC_PIXEL_FORMAT_A8R8G8B8;
+        break;
+    case DRM_FORMAT_NV12:
+        c->outputSurfaceConfig.OutPixelFormat = VIC_PIXEL_FORMAT_Y8_U8V8_N420;
+        break;
+    default:
+        return 1;
+    }
+    switch (op.output().format) {
+    case DRM_FORMAT_MOD_LINEAR:
+        c->outputSurfaceConfig.OutBlkKind = VIC_BLK_KIND_PITCH;
+        break;
+    default:
+        return 1;
+    }
+
     c->outputSurfaceConfig.OutSurfaceWidth = op.output().width-1;
     c->outputSurfaceConfig.OutSurfaceHeight = op.output().height-1;
     c->outputSurfaceConfig.OutLumaWidth = op.output().pitch-1;
     c->outputSurfaceConfig.OutLumaHeight = op.output().height-1;
-    c->outputSurfaceConfig.OutChromaWidth = 16383;
-    c->outputSurfaceConfig.OutChromaHeight = 16383;
+    c->outputSurfaceConfig.OutChromaWidth = (op.output().pitch / 2)-1;
+    c->outputSurfaceConfig.OutChromaHeight = (op.output().height / 2)-1;
 
     const VicOp::Surface &in0 = op.input(0);
     if (in0.bo) {
@@ -233,23 +250,43 @@ int VicDevice::run(VicOp &op)
         slot.SoftClampHigh = 1023;
 
         SlotSurfaceConfig &surf = c->slotStruct[0].slotSurfaceConfig;
-        surf.SlotPixelFormat = VIC_PIXEL_FORMAT_Y8_V8U8_N420;
-        surf.SlotBlkKind = VIC_BLK_KIND_PITCH;
-        surf.SlotCacheWidth = VIC_CACHE_WIDTH_64Bx4;
-        surf.SlotSurfaceWidth = in0.width - 1;
-        surf.SlotSurfaceHeight = in0.height - 1;
-        surf.SlotLumaWidth = in0.pitch - 1;
-        surf.SlotLumaHeight = in0.height - 1;
-        surf.SlotChromaWidth = (in0.pitch / 2) - 1;
-        surf.SlotChromaHeight = (in0.height / 2) - 1;
+        switch (in0.fourcc) {
+        case DRM_FORMAT_ARGB8888:
+            surf.SlotPixelFormat = VIC_PIXEL_FORMAT_A8R8G8B8;
+            break;
+        case DRM_FORMAT_NV12:
+            surf.SlotPixelFormat = VIC_PIXEL_FORMAT_Y8_U8V8_N420;
+            if (op.output().fourcc == DRM_FORMAT_ARGB8888)
+                matrixToFixed(rec601_to_rgb, &c->slotStruct[0].colorMatrixStruct);
+            break;
+        default:
+            return 1;
+        }
+        switch (in0.format) {
+        case DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK_TWO_GOB:
+            surf.SlotBlkKind = VIC_BLK_KIND_GENERIC_16Bx2;
+            surf.SlotBlkHeight = 1;
+            surf.SlotCacheWidth = VIC_CACHE_WIDTH_32Bx8;
+            break;
+        case DRM_FORMAT_MOD_LINEAR:
+            surf.SlotBlkKind = VIC_BLK_KIND_PITCH;
+            surf.SlotCacheWidth = VIC_CACHE_WIDTH_64Bx4;
+            break;
+        default:
+            return 1;
+        }
+        surf.SlotSurfaceWidth = in0.width - 1;          // Non-padded width in pixels
+        surf.SlotSurfaceHeight = in0.height - 1;        // Height in pixels
+        surf.SlotLumaWidth = in0.pitch - 1;             // Padded width in pixels
+        surf.SlotLumaHeight = in0.height - 1;           // Height in pixels
+        surf.SlotChromaWidth = (in0.pitch / 2) - 1;     // Padded width in pixels
+        surf.SlotChromaHeight = (in0.height / 2) - 1;   // Height in pixels
 
         surf.SlotChromaLocHoriz = 1;
         surf.SlotChromaLocVert = 1;
-
-        matrixToFixed(rec601_to_rgb, &c->slotStruct[0].colorMatrixStruct);
     }
 
-    memset(cmd, 0, 128);
+    memset(cmd, 0, 0x1000);
     i = 0;
 
 #define M(name, value) do {\
@@ -265,7 +302,7 @@ int VicDevice::run(VicOp &op)
     }\
     \
     drm_tegra_submit_buf __buf = { 0 };\
-    __buf.mapping_id = (h)->mappingId();\
+    __buf.mapping_id = (h)->mappingId(_context);\
     __buf.reloc.target_offset = (offs);\
     __buf.reloc.gather_offset_words = i-1;\
     __buf.reloc.shift = 8;\
@@ -289,6 +326,8 @@ int VicDevice::run(VicOp &op)
     BO(&_filter_bo, 0, false);
     M(NVB0B6_VIDEO_COMPOSITOR_SET_OUTPUT_SURFACE_LUMA_OFFSET, 0xdeadbeef);
     BO(op.output().bo, 0, true);
+    M(NVB0B6_VIDEO_COMPOSITOR_SET_OUTPUT_SURFACE_CHROMA_U_OFFSET, 0xdeadbeef);
+    BO(op.output().bo, op.output().pitch*op.output().paddedHeight(), true);
 
     if (in0.bo) {
         M(is41 ? NVB1B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_LUMA_OFFSET
@@ -299,7 +338,7 @@ int VicDevice::run(VicOp &op)
         M(is41 ? NVB1B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_CHROMA_U_OFFSET
                : NVB0B6_VIDEO_COMPOSITOR_SET_SURFACE0_SLOT0_CHROMA_U_OFFSET,
                0xdeadbeef);
-        BO(in0.bo, in0.pitch * in0.height, false);
+        BO(in0.bo, in0.pitch * in0.paddedHeight(), false);
     }
 
     M(NVB0B6_VIDEO_COMPOSITOR_EXECUTE, (1 << 8));
@@ -328,7 +367,9 @@ int VicDevice::run(VicOp &op)
             return err;
         }
 
-        return _dev.waitSyncpoint(_syncpt, submit.syncpt_incr.fence_value);
+        err = _dev.waitSyncpoint(_syncpt, submit.syncpt_incr.fence_value);
+        if (err)
+            return err;
     } else {
         drm_tegra_syncpt incr;
         incr.id = _syncpt;

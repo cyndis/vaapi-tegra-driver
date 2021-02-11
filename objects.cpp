@@ -22,6 +22,8 @@
  */
 
 #include "objects.h"
+#include "buffer.h"
+#include "context.h"
 
 #include <cstdio>
 
@@ -59,6 +61,34 @@ Buffer* Objects::createBuffer(VABufferID* id)
 Buffer * Objects::buffer(VABufferID id)
 {
     return static_cast<Buffer *>(getGeneric(id));
+}
+
+Context* Objects::createContext(VAContextID* id)
+{
+    Context *context = new Context;
+
+    *id = addGeneric(context);
+
+    return context;
+}
+
+Context * Objects::context(VAContextID id)
+{
+    return static_cast<Context *>(getGeneric(id));
+}
+
+Image* Objects::createImage(VAImageID* id)
+{
+    Image *image = new Image;
+
+    *id = addGeneric(image);
+
+    return image;
+}
+
+Image * Objects::image(VAImageID id)
+{
+    return static_cast<Image *>(getGeneric(id));
 }
 
 VAGenericID Objects::addGeneric(Object* obj)

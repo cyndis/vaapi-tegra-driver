@@ -33,8 +33,8 @@
 #include <poll.h>
 #include <stdlib.h>
 
-#include "tegra_drm.h"
-#include "host1x_uapi.h"
+#include "uapi_headers/tegra_drm.h"
+#include "uapi_headers/host1x_uapi.h"
 
 DrmDevice::DrmDevice()
 {
@@ -172,6 +172,7 @@ int DrmDevice::waitSyncpoint(uint32_t id, uint32_t threshold) {
         pfd.fd = create_fence_args.fence_fd;
         pfd.events = POLLIN;
         err = poll(&pfd, 1, 2000);
+        close(create_fence_args.fence_fd);
         if (err < 1)
             return err;
 
@@ -190,18 +191,21 @@ int DrmDevice::waitSyncpoint(uint32_t id, uint32_t threshold) {
 
         return 0;
     }
+
+    // printf("Syncpoint wait %u:%u timed out\n", id, threshold);
 }
 
 GemBuffer::GemBuffer(DrmDevice &dev)
-: _dev(dev), _valid(false), _handle(0), _map(nullptr), _mapping_id(0)
+: _dev(dev), _valid(false), _handle(0), _map(nullptr)
 {
 }
 
 GemBuffer::~GemBuffer()
 {
-    if (_mapping_id) {
+    for (const auto& [channel_ctx, mapping_id] : _mapping_ids) {
         struct drm_tegra_channel_unmap channel_unmap_args = { 0 };
-        channel_unmap_args.mapping_id = _mapping_id;
+        channel_unmap_args.channel_ctx = channel_ctx;
+        channel_unmap_args.mapping_id = mapping_id;
         _dev.ioctl(DRM_IOCTL_TEGRA_CHANNEL_UNMAP, &channel_unmap_args);
     }
 
@@ -224,7 +228,7 @@ int GemBuffer::channelMap(uint32_t channel_ctx, bool readwrite)
     struct drm_tegra_channel_map channel_map_args = { 0 };
     int err;
 
-    if (!_dev.isNewApi() || _mapping_id != 0)
+    if (!_dev.isNewApi() || _mapping_ids.find(channel_ctx) != _mapping_ids.end())
         return 0;
 
     channel_map_args.channel_ctx = channel_ctx;
@@ -237,7 +241,7 @@ int GemBuffer::channelMap(uint32_t channel_ctx, bool readwrite)
         return err;
     }
 
-    _mapping_id = channel_map_args.mapping_id;
+    _mapping_ids.insert({channel_ctx, channel_map_args.mapping_id});
 
     return 0;
 }
@@ -312,4 +316,23 @@ void * GemBuffer::map()
     }
 
     return _map;
+}
+
+int32_t GemBuffer::exportFd(bool readwrite)
+{
+    struct drm_prime_handle args;
+    int err;
+
+    memset(&args, 0, sizeof(args));
+
+    args.handle = _handle;
+    args.flags = readwrite ? DRM_RDWR : 0;
+
+    err = _dev.ioctl(DRM_IOCTL_PRIME_HANDLE_TO_FD, &args);
+    if (err == -1) {
+        perror("GEM export failed");
+        return -1;
+    }
+
+    return args.fd;
 }

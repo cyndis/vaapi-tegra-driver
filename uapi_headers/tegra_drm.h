@@ -4,7 +4,7 @@
 #ifndef _UAPI_TEGRA_DRM_H_
 #define _UAPI_TEGRA_DRM_H_
 
-#include "drm.h"
+#include <drm.h>
 
 #if defined(__cplusplus)
 extern "C" {
