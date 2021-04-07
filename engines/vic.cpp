@@ -143,6 +143,8 @@ int VicDevice::open() {
         _version = Version::Vic4_0;
     else if (!strcmp(tmp, "24\n"))
         _version = Version::Vic4_1;
+    else if (!strcmp(tmp, "25\n"))
+        _version = Version::Vic4_1;
     else {
         printf("Unknown chip\n");
         return -1;

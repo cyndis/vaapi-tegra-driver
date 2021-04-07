@@ -105,6 +105,8 @@ int NvdecDevice::open()
         _is210 = true;
     else if (!strcmp(tmp, "24\n"))
         _is210 = false;
+    else if (!strcmp(tmp, "25\n"))
+        _is210 = false;
     else {
         printf("Unknown chip %s\n", tmp);
         return -1;
