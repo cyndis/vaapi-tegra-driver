@@ -32,22 +32,14 @@
 #include <cstdio>
 #include <poll.h>
 #include <stdlib.h>
+#include <ctime>
 
 #include "uapi_headers/tegra_drm.h"
 #include "uapi_headers/host1x_uapi.h"
 
 DrmDevice::DrmDevice()
 {
-    if (access("/dev/host1x", F_OK) == 0 && !getenv("VAAPI_TEGRA_FORCE_OLDAPI")) {
-        printf("Using new api.\n");
-        _new_api = true;
-        _host_fd = open("/dev/host1x", O_RDWR);
-        if (_host_fd == -1) {
-            perror("Failed to open Host1x device");
-        }
-    } else {
-        printf("Using old api.\n");
-    }
+    _new_api = true;
 
     _fd = open("/dev/dri/card0", O_RDWR);
     if (_fd == -1) {
@@ -59,19 +51,11 @@ DrmDevice::~DrmDevice()
 {
     if (_fd != -1)
         close(_fd);
-
-    if (_host_fd != -1)
-        close(_host_fd);
 }
 
 int DrmDevice::ioctl(int request, void *ptr)
 {
     return ::ioctl(_fd, request, ptr);
-}
-
-int DrmDevice::host_ioctl(int request, void *ptr)
-{
-    return ::ioctl(_host_fd, request, ptr);
 }
 
 int DrmDevice::open_channel(uint32_t cl, uint64_t *context) {
@@ -118,22 +102,13 @@ int DrmDevice::allocate_syncpoint(uint64_t context, uint32_t *syncpt) {
     int err;
 
     if (_new_api) {
-        struct host1x_allocate_syncpoint allocate_syncpoint_args = {0};
-        struct host1x_syncpoint_info syncpoint_info_args = {0};
+        struct drm_tegra_syncpoint_allocate syncpoint_allocate_args = {0};
 
-        err = host_ioctl(HOST1X_IOCTL_ALLOCATE_SYNCPOINT, &allocate_syncpoint_args);
+        err = ioctl(DRM_IOCTL_TEGRA_SYNCPOINT_ALLOCATE, &syncpoint_allocate_args);
         if (err == -1)
             return -1;
 
-        err = ::ioctl(allocate_syncpoint_args.fd, HOST1X_IOCTL_SYNCPOINT_INFO,
-            &syncpoint_info_args);
-        if (err == -1) {
-            close(allocate_syncpoint_args.fd);
-            return -1;
-        }
-
-        _syncpt_fds[syncpoint_info_args.id] = allocate_syncpoint_args.fd;
-        *syncpt = syncpoint_info_args.id;
+        *syncpt = syncpoint_allocate_args.id;
     } else {
         struct drm_tegra_get_syncpt get_syncpt_args = {0};
         get_syncpt_args.context = context;
@@ -150,31 +125,32 @@ int DrmDevice::allocate_syncpoint(uint64_t context, uint32_t *syncpt) {
 }
 
 void DrmDevice::free_syncpoint(uint32_t syncpt) {
-    close(_syncpt_fds[syncpt]);
-    _syncpt_fds.erase(syncpt);
+    struct drm_tegra_syncpoint_free syncpoint_free_args = {0};
+
+    syncpoint_free_args.id = syncpt;
+
+    ioctl(DRM_IOCTL_TEGRA_SYNCPOINT_FREE, &syncpoint_free_args);
 }
 
 int DrmDevice::waitSyncpoint(uint32_t id, uint32_t threshold) {
     int err;
 
     if (_new_api) {
-        struct host1x_create_fence create_fence_args = { 0 };
-        create_fence_args.id = id;
-        create_fence_args.threshold = threshold;
+        struct timespec ts;
+        struct drm_tegra_syncpoint_wait syncpoint_wait_args = { 0 };
 
-        err = host_ioctl(HOST1X_IOCTL_CREATE_FENCE, &create_fence_args);
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+
+        syncpoint_wait_args.id = id;
+        syncpoint_wait_args.threshold = threshold;
+        syncpoint_wait_args.timeout_ns = (int64_t)ts.tv_sec * 1000000000 + (int64_t)ts.tv_nsec +
+            2000000000;
+
+        err = ioctl(DRM_IOCTL_TEGRA_SYNCPOINT_WAIT, &syncpoint_wait_args);
         if (err == -1) {
-            perror("Fence creation failed");
+            perror("Syncpt wait failed");
             return err;
         }
-
-        pollfd pfd = { 0 };
-        pfd.fd = create_fence_args.fence_fd;
-        pfd.events = POLLIN;
-        err = poll(&pfd, 1, 2000);
-        close(create_fence_args.fence_fd);
-        if (err < 1)
-            return err;
 
         return 0;
     } else {

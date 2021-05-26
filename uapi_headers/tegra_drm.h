@@ -627,8 +627,8 @@ struct drm_tegra_gem_get_flags {
 	__u32 flags;
 };
 
-#define DRM_TEGRA_GEM_CREATE_LEGACY	0x00
-#define DRM_TEGRA_GEM_MMAP_LEGACY	0x01
+#define DRM_TEGRA_GEM_CREATE		0x00
+#define DRM_TEGRA_GEM_MMAP		0x01
 #define DRM_TEGRA_SYNCPT_READ		0x02
 #define DRM_TEGRA_SYNCPT_INCR		0x03
 #define DRM_TEGRA_SYNCPT_WAIT		0x04
@@ -642,8 +642,8 @@ struct drm_tegra_gem_get_flags {
 #define DRM_TEGRA_GEM_SET_FLAGS		0x0c
 #define DRM_TEGRA_GEM_GET_FLAGS		0x0d
 
-#define DRM_IOCTL_TEGRA_GEM_CREATE_LEGACY DRM_IOWR(DRM_COMMAND_BASE + DRM_TEGRA_GEM_CREATE_LEGACY, struct drm_tegra_gem_create)
-#define DRM_IOCTL_TEGRA_GEM_MMAP_LEGACY DRM_IOWR(DRM_COMMAND_BASE + DRM_TEGRA_GEM_MMAP_LEGACY, struct drm_tegra_gem_mmap)
+#define DRM_IOCTL_TEGRA_GEM_CREATE DRM_IOWR(DRM_COMMAND_BASE + DRM_TEGRA_GEM_CREATE, struct drm_tegra_gem_create)
+#define DRM_IOCTL_TEGRA_GEM_MMAP DRM_IOWR(DRM_COMMAND_BASE + DRM_TEGRA_GEM_MMAP, struct drm_tegra_gem_mmap)
 #define DRM_IOCTL_TEGRA_SYNCPT_READ DRM_IOWR(DRM_COMMAND_BASE + DRM_TEGRA_SYNCPT_READ, struct drm_tegra_syncpt_read)
 #define DRM_IOCTL_TEGRA_SYNCPT_INCR DRM_IOWR(DRM_COMMAND_BASE + DRM_TEGRA_SYNCPT_INCR, struct drm_tegra_syncpt_incr)
 #define DRM_IOCTL_TEGRA_SYNCPT_WAIT DRM_IOWR(DRM_COMMAND_BASE + DRM_TEGRA_SYNCPT_WAIT, struct drm_tegra_syncpt_wait)
@@ -658,6 +658,14 @@ struct drm_tegra_gem_get_flags {
 #define DRM_IOCTL_TEGRA_GEM_GET_FLAGS DRM_IOWR(DRM_COMMAND_BASE + DRM_TEGRA_GEM_GET_FLAGS, struct drm_tegra_gem_get_flags)
 
 /* New TegraDRM UAPI */
+
+/**
+ * Reported by the driver in the `hardware_flags` field.
+ *
+ * If set, the engine is cache coherent with regard to the system
+ * memory.
+ */
+#define DRM_TEGRA_CHANNEL_OPEN_HW_CACHE_COHERENT	(1<<0)
 
 struct drm_tegra_channel_open {
 	/**
@@ -689,6 +697,13 @@ struct drm_tegra_channel_open {
 	 * to determine how the engine needs to be programmed.
 	 */
 	__u32 hardware_version;
+
+	/**
+	 * @hardware_flags: [out]
+	 *
+	 * Flags describing the hardware capabilities.
+	 */
+	__u32 hardware_flags;
 };
 
 struct drm_tegra_channel_close {
@@ -775,10 +790,7 @@ struct drm_tegra_submit_buf {
 	__u32 flags;
 
 	/**
-	 * Information for relocation patching. Relocation patching will
-	 * be done if the MAP IOCTL that created `mapping_id` did not
-	 * return an IOVA. If an IOVA was returned, the application is
-	 * responsible for patching the address into the gather.
+	 * Information for relocation patching.
 	 */
 	struct {
 		/**
@@ -809,12 +821,11 @@ struct drm_tegra_submit_buf {
 
 struct drm_tegra_submit_syncpt_incr {
 	/**
-	 * @syncpt_fd: [in]
+	 * @id: [in]
 	 *
-	 * Syncpoint file descriptor of the syncpoint that the job will
-	 * increment.
+	 * ID of the syncpoint that the job will increment.
 	 */
-	__s32 syncpt_fd;
+	__u32 id;
 
 	/**
 	 * @flags: [in]
@@ -855,6 +866,12 @@ struct drm_tegra_submit_syncpt_incr {
  * commands.
  */
 #define DRM_TEGRA_SUBMIT_CMD_WAIT_SYNCPT		1
+/**
+ * Wait for a syncpoint to reach a value before continuing with further
+ * commands. The threshold is calculated in relation to the start of the
+ * job.
+ */
+#define DRM_TEGRA_SUBMIT_CMD_WAIT_SYNCPT_RELATIVE	2
 
 struct drm_tegra_submit_cmd_gather_uptr {
 	__u32 words;
@@ -942,11 +959,77 @@ struct drm_tegra_channel_submit {
 	__u64 gather_data_ptr;
 
 	/**
+	 * @syncobj_in: [in]
+	 *
+	 * Handle for DRM syncobj that will be waited before submission.
+	 * Ignored if zero.
+	 */
+	__u32 syncobj_in;
+
+	/**
+	 * @syncobj_out: [in]
+	 *
+	 * Handle for DRM syncobj that will have its fence replaced with
+	 * the job's completion fence. Ignored if zero.
+	 */
+	__u32 syncobj_out;
+
+	/**
 	 * @syncpt_incr: [in,out]
 	 *
 	 * Information about the syncpoint the job will increment.
 	 */
 	struct drm_tegra_submit_syncpt_incr syncpt_incr;
+};
+
+struct drm_tegra_syncpoint_allocate {
+	/**
+	 * @id: [out]
+	 *
+	 * ID of allocated syncpoint.
+	 */
+	__u32 id;
+};
+
+struct drm_tegra_syncpoint_free {
+	/**
+	 * @id: [in]
+	 *
+	 * ID of syncpoint to free.
+	 */
+	__u32 id;
+};
+
+struct drm_tegra_syncpoint_wait {
+	/**
+	 * @timeout: [in]
+	 *
+	 * Absolute timestamp at which the wait will time out.
+	 */
+	__s64 timeout_ns;
+
+	/**
+	 * @id: [in]
+	 *
+	 * ID of syncpoint to wait on.
+	 */
+	__u32 id;
+
+	/**
+	 * @threshold: [in]
+	 *
+	 * Threshold to wait for.
+	 */
+	__u32 threshold;
+
+	/**
+	 * @value: [out]
+	 *
+	 * Value of the syncpoint upon wait completion.
+	 */
+	__u32 value;
+
+	__u32 padding[1];
 };
 
 #define DRM_IOCTL_TEGRA_CHANNEL_OPEN     DRM_IOWR(DRM_COMMAND_BASE + 0x10, struct drm_tegra_channel_open)
@@ -955,8 +1038,9 @@ struct drm_tegra_channel_submit {
 #define DRM_IOCTL_TEGRA_CHANNEL_UNMAP    DRM_IOWR(DRM_COMMAND_BASE + 0x13, struct drm_tegra_channel_unmap)
 #define DRM_IOCTL_TEGRA_CHANNEL_SUBMIT   DRM_IOWR(DRM_COMMAND_BASE + 0x14, struct drm_tegra_channel_submit)
 
-#define DRM_IOCTL_TEGRA_GEM_CREATE       DRM_IOWR(DRM_COMMAND_BASE + 0x15, struct drm_tegra_gem_create)
-#define DRM_IOCTL_TEGRA_GEM_MMAP         DRM_IOWR(DRM_COMMAND_BASE + 0x16, struct drm_tegra_gem_mmap)
+#define DRM_IOCTL_TEGRA_SYNCPOINT_ALLOCATE	DRM_IOWR(DRM_COMMAND_BASE + 0x20, struct drm_tegra_syncpoint_allocate)
+#define DRM_IOCTL_TEGRA_SYNCPOINT_FREE		DRM_IOWR(DRM_COMMAND_BASE + 0x21, struct drm_tegra_syncpoint_free)
+#define DRM_IOCTL_TEGRA_SYNCPOINT_WAIT		DRM_IOWR(DRM_COMMAND_BASE + 0x22, struct drm_tegra_syncpoint_wait)
 
 #if defined(__cplusplus)
 }

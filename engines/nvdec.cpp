@@ -310,7 +310,7 @@ int NvdecDevice::run(NvdecOp& op)
         submit.bufs_ptr = (__u64)&relocs_new[0];
         submit.cmds_ptr = (__u64)&submit_cmds[0];
         submit.gather_data_ptr = (__u64)&cmd[0];
-        submit.syncpt_incr.syncpt_fd = _dev.syncpointFd(_syncpt);
+        submit.syncpt_incr.id = _syncpt;
         submit.syncpt_incr.num_incrs = 1;
 
         err = _dev.ioctl(DRM_IOCTL_TEGRA_CHANNEL_SUBMIT, &submit);

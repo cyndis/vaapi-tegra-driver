@@ -36,7 +36,6 @@ public:
     ~DrmDevice();
 
     int ioctl(int request, void *ptr);
-    int host_ioctl(int request, void *ptr);
 
     int fd() const { return _fd; }
 
@@ -46,15 +45,12 @@ public:
     void free_syncpoint(uint32_t syncpt);
 
     bool isNewApi() const { return _new_api; }
-    int syncpointFd(uint32_t id) { return _syncpt_fds[id]; }
 
     int waitSyncpoint(uint32_t id, uint32_t threshold);
 
 private:
-    int _fd, _host_fd;
+    int _fd;
     bool _new_api;
-
-    std::map<uint32_t, int> _syncpt_fds;
 };
 
 typedef uint32_t gem_handle;
