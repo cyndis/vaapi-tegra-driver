@@ -320,6 +320,7 @@ int VicDevice::run(VicOp &op)
     relocs.push_back(__reloc);\
 } while(0);
 
+    M(NVB0B6_VIDEO_COMPOSITOR_SET_APPLICATION_ID, 1);
     M(NVB0B6_VIDEO_COMPOSITOR_SET_CONTROL_PARAMS,
         ((is41 ? sizeof(ConfigStruct_VIC41) : sizeof(ConfigStruct_VIC40)) / 16) << 16);
     M(NVB0B6_VIDEO_COMPOSITOR_SET_CONFIG_STRUCT_OFFSET, 0xdeadbeef);
