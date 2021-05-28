@@ -28,6 +28,11 @@
 #include <va/va_backend.h>
 #include <linux/kernel.h>
 
+enum class NvdecCodec {
+    MPEG2,
+    H264
+};
+
 class NvdecOp {
 public:
     struct Surface {
@@ -44,20 +49,36 @@ public:
         }
     };
 
+    struct MPEG2 {
+        VAPictureParameterBufferMPEG2 picture_parameters;
+        VAIQMatrixBufferMPEG2 iq_matrix;
+        GemBuffer *forward_reference;
+        GemBuffer *backward_reference;
+    };
+
+    struct H264 {
+        VAPictureParameterBufferH264 picture_parameters;
+        VASliceParameterBufferH264 slice_parameters;
+        VAIQMatrixBufferH264 iq_matrix;
+        GemBuffer *references[16];
+    };
+
     NvdecOp();
 
-    void setPictureParameters(VAPictureParameterBufferMPEG2 picture_parameters) {
-        _picture_parameters = picture_parameters;
-    }
-    const VAPictureParameterBufferMPEG2 &pictureParameters() const {
-        return _picture_parameters;
+    void setCodec(NvdecCodec codec) {
+        _codec = codec;
     }
 
-    void setIQMatrix(VAIQMatrixBufferMPEG2 iq_matrix) {
-        _iq_matrix = iq_matrix;
+    NvdecCodec codec() const {
+        return _codec;
     }
-    const VAIQMatrixBufferMPEG2 &iqMatrix() const {
-        return _iq_matrix;
+
+    MPEG2 &mpeg2() {
+        return _mpeg2;
+    }
+
+    H264 &h264() {
+        return _h264;
     }
 
     void setSliceData(GemBuffer *slice_data) {
@@ -88,32 +109,19 @@ public:
         return _slice_data_offsets;
     }
 
-    void setForwardReference(GemBuffer *forward_reference) {
-        _forward_reference = forward_reference;
-    }
-    GemBuffer *forwardReference() const {
-        return _forward_reference;
-    }
-
-    void setBackwardReference(GemBuffer *backward_reference) {
-        _backward_reference = backward_reference;
-    }
-    GemBuffer *backwardReference() const {
-        return _backward_reference;
-    }
-
     void setOutput(NvdecOp::Surface surf) { _output = surf; }
     const Surface &output() const { return _output; }
 
 private:
-    VAPictureParameterBufferMPEG2 _picture_parameters;
-    VAIQMatrixBufferMPEG2 _iq_matrix;
+    NvdecCodec _codec;
+
+    MPEG2 _mpeg2;
+    H264 _h264;
+
     GemBuffer *_slice_data;
     uint32_t _slice_data_length;
     uint32_t _num_slices;
     GemBuffer *_slice_data_offsets;
-    GemBuffer *_forward_reference;
-    GemBuffer *_backward_reference;
     NvdecOp::Surface _output;
 };
 
@@ -131,7 +139,18 @@ private:
     uint64_t _context;
     uint32_t _syncpt;
     GemBuffer _cmd_bo, _config_bo, _status_bo;
+    GemBuffer _history_bo, _mbhist_bo, _coloc_bo;
     bool _is210;
+
+    struct SlotManager {
+        std::array<VASurfaceID, 17> slots;
+
+        SlotManager();
+        void clean(const VAPictureH264 *refs, size_t num_refs);
+        int get(VASurfaceID surface, bool insert);
+    } _slots;
+
+    void runH264(void *cfg, NvdecOp &op, std::vector<GemBuffer *> &surfaces);
 };
 
 #endif // GEM_H

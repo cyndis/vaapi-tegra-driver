@@ -78,6 +78,9 @@
 #define NVC5B0_SET_PICTURE_CHROMA_OFFSET2                                       (0x0000047C)
 #define NVC5B0_SET_HISTOGRAM_OFFSET                                             (0x00000420)
 #define NVC5B0_SET_NVDEC_STATUS_OFFSET                                          (0x00000424)
+#define NVC5B0_SET_COLOC_DATA_OFFSET                                            (0x00000414)
+#define NVC5B0_SET_HISTORY_OFFSET                                               (0x00000418)
+#define NVC5B0_H264_SET_MBHIST_BUF_OFFSET                                       (0x00000500)
 
 typedef struct _nvdec_display_param_s {
     uint32_t enableTFOutput : 1;
@@ -152,6 +155,114 @@ typedef struct _nvdec_mpeg2_pic_s {
     nvdec_display_param_s displayPara;
     uint32_t reserved3[3];
 } nvdec_mpeg2_pic_s;
+
+// H.264
+typedef struct _nvdec_dpb_entry_s  // 16 bytes
+{
+    uint32_t index          : 7;    // uncompressed frame buffer index
+    uint32_t col_idx        : 5;    // index of associated co-located motion data buffer
+    uint32_t state          : 2;    // bit1(state)=1: top field used for reference, bit1(state)=1: bottom field used for reference
+    uint32_t is_long_term   : 1;    // 0=short-term, 1=long-term
+    uint32_t not_existing   : 1;    // 1=marked as non-existing
+    uint32_t is_field       : 1;    // set if unpaired field or complementary field pair
+    uint32_t top_field_marking : 4;
+    uint32_t bottom_field_marking : 4;
+    uint32_t output_memory_layout : 1;  // Set according to picture level output NV12/NV24 setting.
+    uint32_t reserved       : 6;
+    uint32_t FieldOrderCnt[2];      // : 2*32 [top/bottom]
+    uint32_t FrameIdx;                       // : 16   short-term: FrameNum (16 bits), long-term: LongTermFrameIdx (4 bits)
+} nvdec_dpb_entry_s;
+
+typedef struct _nvdec_h264_pic_s
+{
+    uint32_t reserved0[13];
+    uint8_t  eos[16];
+    uint8_t  explicitEOSPresentFlag;
+    uint8_t  hint_dump_en; //enable COLOMV surface dump for all frames, which includes hints of "MV/REFIDX/QP/CBP/MBPART/MBTYPE", nvbug: 200212874
+    uint8_t  reserved1[2];
+    uint32_t stream_len;
+    uint32_t slice_count;
+    uint32_t mbhist_buffer_size;     // to pass buffer size of MBHIST_BUFFER
+
+    // Driver may or may not use based upon need.
+    // If 0 then default value of 1<<27 = 298ms @ 450MHz will be used in ucode.
+    // Driver can send this value based upon resolution using the formula:
+    // gptimer_timeout_value = 3 * (cycles required for one frame)
+    uint32_t gptimer_timeout_value;
+
+    // Fields from msvld_h264_seq_s
+    int32_t log2_max_pic_order_cnt_lsb_minus4;
+    int32_t delta_pic_order_always_zero_flag;
+    int32_t frame_mbs_only_flag;
+    uint32_t PicWidthInMbs;
+    uint32_t FrameHeightInMbs;
+
+    uint32_t tileFormat                 : 2 ;   // 0: TBL; 1: KBL;
+    uint32_t gob_height                 : 3 ;   // Set GOB height, 0: GOB_2, 1: GOB_4, 2: GOB_8, 3: GOB_16, 4: GOB_32 (NVDEC3 onwards)
+    uint32_t reserverd_surface_format   : 27;
+
+    // Fields from msvld_h264_pic_s
+    uint32_t entropy_coding_mode_flag;
+    int32_t pic_order_present_flag;
+    int32_t num_ref_idx_l0_active_minus1;
+    int32_t num_ref_idx_l1_active_minus1;
+    int32_t deblocking_filter_control_present_flag;
+    int32_t redundant_pic_cnt_present_flag;
+    uint32_t transform_8x8_mode_flag;
+
+    // Fields from mspdec_h264_picture_setup_s
+    uint32_t pitch_luma;                    // Luma pitch
+    uint32_t pitch_chroma;                  // chroma pitch
+
+    uint32_t luma_top_offset;               // offset of luma top field in units of 256
+    uint32_t luma_bot_offset;               // offset of luma bottom field in units of 256
+    uint32_t luma_frame_offset;             // offset of luma frame in units of 256
+    uint32_t chroma_top_offset;             // offset of chroma top field in units of 256
+    uint32_t chroma_bot_offset;             // offset of chroma bottom field in units of 256
+    uint32_t chroma_frame_offset;           // offset of chroma frame in units of 256
+    uint32_t HistBufferSize;                // in units of 256
+
+    uint32_t MbaffFrameFlag           : 1;  //
+    uint32_t direct_8x8_inference_flag: 1;  //
+    uint32_t weighted_pred_flag       : 1;  //
+    uint32_t constrained_intra_pred_flag:1; //
+    uint32_t ref_pic_flag             : 1;  // reference picture (nal_ref_idc != 0)
+    uint32_t field_pic_flag           : 1;  //
+    uint32_t bottom_field_flag        : 1;  //
+    uint32_t second_field             : 1;  // second field of complementary reference field
+    uint32_t log2_max_frame_num_minus4: 4;  //  (0..12)
+    uint32_t chroma_format_idc        : 2;  //
+    uint32_t pic_order_cnt_type       : 2;  //  (0..2)
+    int32_t pic_init_qp_minus26               : 6;  // : 6 (-26..+25)
+    int32_t chroma_qp_index_offset            : 5;  // : 5 (-12..+12)
+    int32_t second_chroma_qp_index_offset     : 5;  // : 5 (-12..+12)
+
+    uint32_t weighted_bipred_idc      : 2;  // : 2 (0..2)
+    uint32_t CurrPicIdx               : 7;  // : 7  uncompressed frame buffer index
+    uint32_t CurrColIdx               : 5;  // : 5  index of associated co-located motion data buffer
+    uint32_t frame_num                : 16; //
+    uint32_t frame_surfaces           : 1;  // frame surfaces flag
+    uint32_t output_memory_layout     : 1;  // 0: NV12; 1:NV24. Field pair must use the same setting.
+
+    int32_t CurrFieldOrderCnt[2];                   // : 32 [Top_Bottom], [0]=TopFieldOrderCnt, [1]=BottomFieldOrderCnt
+    nvdec_dpb_entry_s dpb[16];
+    uint8_t  WeightScale[6][4][4];         // : 6*4*4*8 in raster scan order (not zig-zag order)
+    uint8_t  WeightScale8x8[2][8][8];      // : 2*8*8*8 in raster scan order (not zig-zag order)
+
+    // mvc setup info, must be zero if not mvc
+    uint8_t num_inter_view_refs_lX[2];         // number of inter-view references
+    int8_t reserved2[14];                               // reserved for alignment
+    int8_t inter_view_refidx_lX[2][16];         // DPB indices (must also be marked as long-term)
+
+    // lossless decode (At the time of writing this manual, x264 and JM encoders, differ in Intra_8x8 reference sample filtering)
+    uint32_t lossless_ipred8x8_filter_enable        : 1;       // = 0, skips Intra_8x8 reference sample filtering, for vertical and horizontal predictions (x264 encoded streams); = 1, filter Intra_8x8 reference samples (JM encoded streams)
+    uint32_t qpprime_y_zero_transform_bypass_flag   : 1;       // determines the transform bypass mode
+    uint32_t reserved3                              : 30;      // kept for alignment; may be used for other parameters
+
+    nvdec_display_param_s displayPara;
+    uint32_t reserved4[3];
+
+} nvdec_h264_pic_s;
 
 typedef struct _nvdec_status_hevc_s
 {

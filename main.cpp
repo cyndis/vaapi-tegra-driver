@@ -21,27 +21,26 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #include <libdrm/drm_fourcc.h>
-#include <va/va_backend.h>
 #include <linux/kernel.h>
+#include <va/va_backend.h>
 
-#include "objects.h"
 #include "buffer.h"
 #include "context.h"
 #include "gem.h"
+#include "objects.h"
 
 #include "engines/vic.h"
 
 extern "C" {
-    #include <va/va_dricommon.h>
+#include <va/va_dricommon.h>
 }
 
-#define FUNC(name, ...) \
-    extern "C" VAStatus tegra_ ## name (VADriverContextP ctx, ##__VA_ARGS__)
+#define FUNC(name, ...) extern "C" VAStatus tegra_##name(VADriverContextP ctx, ##__VA_ARGS__)
 
 #define DRIVER_DATA ((DriverData *)ctx->pDriverData)
 
@@ -68,17 +67,25 @@ FUNC(Terminate)
 
 FUNC(QueryConfigProfiles, VAProfile *profile_list, int *num_profiles)
 {
-    profile_list[0] = VAProfileMPEG2Main;
-    *num_profiles = 1;
+    int num = 0;
+
+    profile_list[num++] = VAProfileMPEG2Main;
+    profile_list[num++] = VAProfileH264ConstrainedBaseline;
+    profile_list[num++] = VAProfileH264Main;
+    profile_list[num++] = VAProfileH264High;
+
+    *num_profiles = num;
 
     return VA_STATUS_SUCCESS;
 }
 
-FUNC(QueryConfigEntrypoints, VAProfile profile, VAEntrypoint *entrypoint_list,
-     int *num_entrypoints)
+FUNC(QueryConfigEntrypoints, VAProfile profile, VAEntrypoint *entrypoint_list, int *num_entrypoints)
 {
     switch (profile) {
     case VAProfileMPEG2Main:
+    case VAProfileH264ConstrainedBaseline:
+    case VAProfileH264Main:
+    case VAProfileH264High:
         entrypoint_list[0] = VAEntrypointVLD;
 
         *num_entrypoints = 1;
@@ -92,12 +99,13 @@ FUNC(QueryConfigEntrypoints, VAProfile profile, VAEntrypoint *entrypoint_list,
     return VA_STATUS_SUCCESS;
 }
 
-FUNC(GetConfigAttributes, VAProfile profile, VAEntrypoint entrypoint,
-     VAConfigAttrib *attrib_list, int num_attribs)
+FUNC(GetConfigAttributes, VAProfile profile, VAEntrypoint entrypoint, VAConfigAttrib *attrib_list,
+    int num_attribs)
 {
     int i;
 
-    if (profile != VAProfileMPEG2Main)
+    if (profile != VAProfileMPEG2Main && profile != VAProfileH264Main &&
+        profile != VAProfileH264ConstrainedBaseline && profile != VAProfileH264High)
         return VA_STATUS_ERROR_INVALID_VALUE;
 
     if (entrypoint != VAEntrypointVLD)
@@ -116,16 +124,27 @@ FUNC(GetConfigAttributes, VAProfile profile, VAEntrypoint entrypoint,
     return VA_STATUS_SUCCESS;
 }
 
-FUNC(CreateConfig, VAProfile profile, VAEntrypoint entrypoint,
-     VAConfigAttrib *attrib_list, int num_attribs, VAConfigID *config_id)
-{
-    if (profile != VAProfileMPEG2Main)
-        return VA_STATUS_ERROR_INVALID_VALUE;
+const VAConfigID CONFIG_MPEG2 = 1001;
+const VAConfigID CONFIG_H264 = 1002;
 
+FUNC(CreateConfig, VAProfile profile, VAEntrypoint entrypoint, VAConfigAttrib *attrib_list,
+    int num_attribs, VAConfigID *config_id)
+{
     if (entrypoint != VAEntrypointVLD)
         return VA_STATUS_ERROR_INVALID_VALUE;
 
-    *config_id = 1001;
+    switch (profile) {
+    case VAProfileMPEG2Main:
+        *config_id = CONFIG_MPEG2;
+        break;
+    case VAProfileH264ConstrainedBaseline:
+    case VAProfileH264Main:
+    case VAProfileH264High:
+        *config_id = CONFIG_H264;
+        break;
+    default:
+        return VA_STATUS_ERROR_INVALID_VALUE;
+    }
 
     return VA_STATUS_SUCCESS;
 }
@@ -135,8 +154,8 @@ FUNC(DestroyConfig, VAConfigID config_id)
     return VA_STATUS_SUCCESS;
 }
 
-FUNC(QueryConfigAttributes, VAConfigID config_id, VAProfile *profile,
-     VAEntrypoint *entrypoint, VAConfigAttrib *attrib_list, int *num_attribs)
+FUNC(QueryConfigAttributes, VAConfigID config_id, VAProfile *profile, VAEntrypoint *entrypoint,
+    VAConfigAttrib *attrib_list, int *num_attribs)
 {
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
@@ -170,11 +189,11 @@ FUNC(CreateSurfaces2, unsigned int format, unsigned int width, unsigned int heig
         buffer->gem = std::move(gem);
 
         switch (format) {
-            case VA_RT_FORMAT_YUV420:
-                surface->format = VA_FOURCC_NV12;
-                break;
-            default:
-                return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+        case VA_RT_FORMAT_YUV420:
+            surface->format = VA_FOURCC_NV12;
+            break;
+        default:
+            return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
         }
     }
 
@@ -233,13 +252,17 @@ FUNC(DestroySurfaces, VASurfaceID *surface_list, int num_surfaces)
     return VA_STATUS_SUCCESS;
 }
 
-FUNC(CreateContext, VAConfigID config_id, int picture_width, int picture_height,
-     int flag, VASurfaceID *render_targets, int num_render_targets,
-     VAContextID *context_id)
+FUNC(CreateContext, VAConfigID config_id, int picture_width, int picture_height, int flag,
+    VASurfaceID *render_targets, int num_render_targets, VAContextID *context_id)
 {
     Context *context = DRIVER_DATA->objects.createContext(context_id);
     if (!context)
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
+
+    if (config_id == CONFIG_MPEG2)
+        context->op.setCodec(NvdecCodec::MPEG2);
+    else if (config_id == CONFIG_H264)
+        context->op.setCodec(NvdecCodec::H264);
 
     return VA_STATUS_SUCCESS;
 }
@@ -250,7 +273,7 @@ FUNC(DestroyContext, VAContextID context)
 }
 
 FUNC(CreateBuffer, VAContextID context, VABufferType type, unsigned int size,
-     unsigned int num_elements, void *data, VABufferID *buf_id)
+    unsigned int num_elements, void *data, VABufferID *buf_id)
 {
     Buffer *buffer = DRIVER_DATA->objects.createBuffer(buf_id);
     if (!buffer)
@@ -317,22 +340,26 @@ FUNC(BeginPicture, VAContextID context_id, VASurfaceID render_target)
 
     /* TODO will need temp surface to unswizzle */
 
+    if (context->op.codec() == NvdecCodec::MPEG2)
+        context->op.mpeg2() = NvdecOp::MPEG2();
+    else if (context->op.codec() == NvdecCodec::H264)
+        context->op.h264() = NvdecOp::H264();
+
     context->op.setOutput(output_surface);
     context->op.setSliceData(nullptr);
     context->op.setSliceDataLength(0);
     context->op.setSliceDataOffsets(nullptr);
-    context->op.setForwardReference(nullptr);
-    context->op.setBackwardReference(nullptr);
     context->num_slices = 0;
     context->total_slice_size = 0;
 
     return VA_STATUS_SUCCESS;
 }
 
-const uint8_t termination_sequence[16] = {
-    0x00, 0x00, 0x01, 0xB7, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x01, 0xB7, 0x00, 0x00, 0x00, 0x00
-};
+const uint8_t termination_sequence_mpeg2[16] = { 0x00, 0x00, 0x01, 0xB7, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x01, 0xB7, 0x00, 0x00, 0x00, 0x00 };
+
+const uint8_t termination_sequence_h264[16] = { 0x00, 0x00, 0x01, 0x0B, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x01, 0x0B, 0x00, 0x00, 0x00, 0x00 };
 
 FUNC(RenderPicture, VAContextID context_id, VABufferID *buffers, int num_buffers)
 {
@@ -342,7 +369,15 @@ FUNC(RenderPicture, VAContextID context_id, VABufferID *buffers, int num_buffers
     if (!context)
         return VA_STATUS_ERROR_INVALID_CONTEXT;
 
-    uint32_t total_slice_size = sizeof(termination_sequence);
+    uint32_t total_slice_size;
+
+    if (context->op.codec() == NvdecCodec::MPEG2)
+        total_slice_size = sizeof(termination_sequence_mpeg2);
+    else if (context->op.codec() == NvdecCodec::H264)
+        total_slice_size = sizeof(termination_sequence_h264);
+    else
+        return VA_STATUS_ERROR_UNKNOWN;
+
     uint32_t num_slices = 0;
     for (i = 0; i < num_buffers; i++) {
         Buffer *buffer = DRIVER_DATA->objects.buffer(buffers[i]);
@@ -352,11 +387,14 @@ FUNC(RenderPicture, VAContextID context_id, VABufferID *buffers, int num_buffers
         if (buffer->type != VASliceParameterBufferType)
             continue;
 
-        auto *buff = (VASliceParameterBufferMPEG2 *)buffer->data.data();
+        auto *buff = (VASliceParameterBufferBase *)buffer->data.data();
 
         total_slice_size += buff->slice_data_size;
+        if (context->op.codec() == NvdecCodec::H264)
+            total_slice_size += 3;
+
         if ((buff->slice_data_flag == VA_SLICE_DATA_FLAG_ALL) ||
-                (buff->slice_data_flag & VA_SLICE_DATA_FLAG_BEGIN))
+            (buff->slice_data_flag & VA_SLICE_DATA_FLAG_BEGIN))
             num_slices++;
 
         if (buff->slice_data_flag != VA_SLICE_DATA_FLAG_ALL) {
@@ -383,8 +421,9 @@ FUNC(RenderPicture, VAContextID context_id, VABufferID *buffers, int num_buffers
 
         memset(context->slice_data->map(), 0, context->slice_data->size());
 
-        if (!context->slice_data_offsets.get() || context->slice_data_offsets->size() < num_slices*4) {
-            auto size = __ALIGN_KERNEL((num_slices+1)*4, 0x1000);
+        if (!context->slice_data_offsets.get() ||
+            context->slice_data_offsets->size() < num_slices * 4) {
+            auto size = __ALIGN_KERNEL((num_slices + 1) * 4, 0x1000);
 
             context->slice_data_offsets.reset();
 
@@ -401,7 +440,7 @@ FUNC(RenderPicture, VAContextID context_id, VABufferID *buffers, int num_buffers
 
     uint32_t current_slice_data_offset = 0;
     uint32_t current_slice_idx = 0;
-    VASliceParameterBufferMPEG2 current_slice_param;
+    VASliceParameterBufferBase current_slice_param;
 
     for (i = 0; i < num_buffers; i++) {
         Buffer *buffer = DRIVER_DATA->objects.buffer(buffers[i]);
@@ -410,39 +449,57 @@ FUNC(RenderPicture, VAContextID context_id, VABufferID *buffers, int num_buffers
 
         switch (buffer->type) {
         case VAPictureParameterBufferType: {
-            auto *buff = (VAPictureParameterBufferMPEG2 *)buffer->data.data();
-            context->op.setPictureParameters(*buff);
+#define SET_REF_PIC(surface_id, output) \
+    if ((surface_id) != VA_INVALID_SURFACE) { \
+        Surface *ref = DRIVER_DATA->objects.surface((surface_id)); \
+        if (!ref) \
+            return VA_STATUS_ERROR_INVALID_SURFACE; \
+        Buffer *buf = DRIVER_DATA->objects.buffer(ref->buffer); \
+        output = buf->gem.get(); \
+    }
 
-            if (buff->forward_reference_picture != VA_INVALID_ID) {
-                Surface *forward_reference =
-                    DRIVER_DATA->objects.surface(buff->forward_reference_picture);
-                if (!forward_reference)
-                    return VA_STATUS_ERROR_INVALID_SURFACE;
+            switch (context->op.codec()) {
+            case NvdecCodec::MPEG2: {
+                auto *buff = (VAPictureParameterBufferMPEG2 *)buffer->data.data();
+                context->op.mpeg2().picture_parameters = *buff;
 
-                Buffer *forward_buffer = DRIVER_DATA->objects.buffer(forward_reference->buffer);
+                SET_REF_PIC(buff->forward_reference_picture, context->op.mpeg2().forward_reference);
+                SET_REF_PIC(
+                    buff->backward_reference_picture, context->op.mpeg2().backward_reference);
 
-                context->op.setForwardReference(forward_buffer->gem.get());
+                break;
             }
+            case NvdecCodec::H264: {
+                auto *buff = (VAPictureParameterBufferH264 *)buffer->data.data();
+                context->op.h264().picture_parameters = *buff;
 
-            if (buff->backward_reference_picture != VA_INVALID_ID) {
-                Surface *backward_reference =
-                    DRIVER_DATA->objects.surface(buff->backward_reference_picture);
-                if (!backward_reference)
-                    return VA_STATUS_ERROR_INVALID_SURFACE;
-
-                Buffer *backward_buffer = DRIVER_DATA->objects.buffer(backward_reference->buffer);
-
-                context->op.setBackwardReference(backward_buffer->gem.get());
+                for (size_t i = 0; i < buff->num_ref_frames; i++)
+                    SET_REF_PIC(
+                        buff->ReferenceFrames[i].picture_id, context->op.h264().references[i]);
+            }
             }
 
             break;
         }
         case VAIQMatrixBufferType:
-            context->op.setIQMatrix(*(VAIQMatrixBufferMPEG2 *)buffer->data.data());
+            switch (context->op.codec()) {
+            case NvdecCodec::MPEG2:
+                context->op.mpeg2().iq_matrix = *(VAIQMatrixBufferMPEG2 *)buffer->data.data();
+                break;
+            case NvdecCodec::H264:
+                context->op.h264().iq_matrix = *(VAIQMatrixBufferH264 *)buffer->data.data();
+                break;
+            }
+
             break;
         case VASliceParameterBufferType: {
-            auto *buff = (VASliceParameterBufferMPEG2 *)buffer->data.data();
+            auto *buff = (VASliceParameterBufferBase *)buffer->data.data();
             current_slice_param = *buff;
+
+            if (context->op.codec() == NvdecCodec::H264) {
+                auto *h264 = (VASliceParameterBufferH264 *)buffer->data.data();
+                context->op.h264().slice_parameters = *h264;
+            }
 
             break;
         }
@@ -451,6 +508,12 @@ FUNC(RenderPicture, VAContextID context_id, VABufferID *buffers, int num_buffers
             *(offs_ptr + current_slice_idx++) = current_slice_data_offset;
 
             uint8_t *ptr = (uint8_t *)context->slice_data->map();
+
+            if (context->op.codec() == NvdecCodec::H264) {
+                memcpy(ptr + current_slice_data_offset, "\x00\x00\x01", 3);
+                current_slice_data_offset += 3;
+            }
+
             memcpy(ptr + current_slice_data_offset,
                 buffer->data.data() + current_slice_param.slice_data_offset,
                 current_slice_param.slice_data_size);
@@ -467,7 +530,15 @@ FUNC(RenderPicture, VAContextID context_id, VABufferID *buffers, int num_buffers
 
     if (num_slices > 0) {
         uint8_t *ptr = (uint8_t *)context->slice_data->map();
-        memcpy(ptr + current_slice_data_offset, termination_sequence, sizeof(termination_sequence));
+
+        if (context->op.codec() == NvdecCodec::MPEG2)
+            memcpy(ptr + current_slice_data_offset, termination_sequence_mpeg2,
+                sizeof(termination_sequence_mpeg2));
+        else if (context->op.codec() == NvdecCodec::H264)
+            memcpy(ptr + current_slice_data_offset, termination_sequence_h264,
+                sizeof(termination_sequence_h264));
+        else
+            return VA_STATUS_ERROR_UNKNOWN;
 
         uint32_t *offs_ptr = (uint32_t *)context->slice_data_offsets->map();
         *(offs_ptr + current_slice_idx) = current_slice_data_offset;
@@ -508,16 +579,14 @@ FUNC(QuerySurfaceStatus, VASurfaceID render_target, VASurfaceStatus *status)
     return VA_STATUS_SUCCESS;
 }
 
-FUNC(QuerySurfaceError, VASurfaceID render_target, VAStatus error_status,
-     void **error_info)
+FUNC(QuerySurfaceError, VASurfaceID render_target, VAStatus error_status, void **error_info)
 {
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
 
-FUNC(PutSurface, VASurfaceID surface, void* draw, short srcx, short srcy,
-     unsigned short srcw, unsigned short srch, short destx, short desty,
-     unsigned short destw, unsigned short desth, VARectangle *cliprects,
-     unsigned int number_cliprects, unsigned int flags)
+FUNC(PutSurface, VASurfaceID surface, void *draw, short srcx, short srcy, unsigned short srcw,
+    unsigned short srch, short destx, short desty, unsigned short destw, unsigned short desth,
+    VARectangle *cliprects, unsigned int number_cliprects, unsigned int flags)
 {
     struct dri_drawable *dri_drawable;
     union dri_buffer *dri_buffer;
@@ -652,8 +721,8 @@ FUNC(SetImagePalette, VAImageID image, unsigned char *palette)
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
 
-FUNC(GetImage, VASurfaceID surface_id, int x, int y, unsigned int width,
-     unsigned int height, VAImageID image_id)
+FUNC(GetImage, VASurfaceID surface_id, int x, int y, unsigned int width, unsigned int height,
+    VAImageID image_id)
 {
     Surface *surface = DRIVER_DATA->objects.surface(surface_id);
     if (!surface)
@@ -699,15 +768,15 @@ FUNC(GetImage, VASurfaceID surface_id, int x, int y, unsigned int width,
     return VA_STATUS_SUCCESS;
 }
 
-FUNC(PutImage, VASurfaceID surface, VAImageID image, int src_x, int src_y,
-     unsigned int src_width, unsigned int src_height, int dest_x, int dest_y,
-     unsigned int dest_width, unsigned int dest_height)
+FUNC(PutImage, VASurfaceID surface, VAImageID image, int src_x, int src_y, unsigned int src_width,
+    unsigned int src_height, int dest_x, int dest_y, unsigned int dest_width,
+    unsigned int dest_height)
 {
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
 
 FUNC(QuerySubpictureFormats, VAImageFormat *format_list, unsigned int *flags,
-     unsigned int *num_formats)
+    unsigned int *num_formats)
 {
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
@@ -727,9 +796,8 @@ FUNC(SetSubpictureImage, VASubpictureID subpicture, VAImageID image)
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
 
-FUNC(SetSubpictureChromakey, VASubpictureID subpicture,
-     unsigned int chromakey_min, unsigned int chromakey_max,
-     unsigned int chromakey_mask)
+FUNC(SetSubpictureChromakey, VASubpictureID subpicture, unsigned int chromakey_min,
+    unsigned int chromakey_max, unsigned int chromakey_mask)
 {
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
@@ -739,17 +807,15 @@ FUNC(SetSubpictureGlobalAlpha, VASubpictureID subpicture, float global_alpha)
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
 
-FUNC(AssociateSubpicture, VASubpictureID subpicture,
-     VASurfaceID *target_surfaces, int num_surfaces, short src_x, short src_y,
-     unsigned short src_width, unsigned short src_height, short dest_x,
-     short dest_y, unsigned short dest_width, unsigned short dest_height,
-     unsigned int flags)
+FUNC(AssociateSubpicture, VASubpictureID subpicture, VASurfaceID *target_surfaces, int num_surfaces,
+    short src_x, short src_y, unsigned short src_width, unsigned short src_height, short dest_x,
+    short dest_y, unsigned short dest_width, unsigned short dest_height, unsigned int flags)
 {
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
 
-FUNC(DeassociateSubpicture, VASubpictureID subpicture,
-     VASurfaceID *target_surfaces, int num_surfaces)
+FUNC(DeassociateSubpicture, VASubpictureID subpicture, VASurfaceID *target_surfaces,
+    int num_surfaces)
 {
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
@@ -769,18 +835,16 @@ FUNC(SetDisplayAttributes, VADisplayAttribute *attr_list, int num_attributes)
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
 
-
 FUNC(BufferInfo, VABufferID buf_id, VABufferType *type, unsigned int *size,
-     unsigned int *num_elements)
+    unsigned int *num_elements)
 {
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
 
-FUNC(LockSurface, VASurfaceID surface, unsigned int *fourcc,
-     unsigned int *luma_stride, unsigned int *chroma_u_stride,
-     unsigned int *chroma_v_stride, unsigned int *luma_offset,
-     unsigned int *chroma_u_offset, unsigned int *chroma_v_offset,
-     unsigned int *buffer_name, void **buffer)
+FUNC(LockSurface, VASurfaceID surface, unsigned int *fourcc, unsigned int *luma_stride,
+    unsigned int *chroma_u_stride, unsigned int *chroma_v_stride, unsigned int *luma_offset,
+    unsigned int *chroma_u_offset, unsigned int *chroma_v_offset, unsigned int *buffer_name,
+    void **buffer)
 {
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
@@ -807,13 +871,14 @@ FUNC(QuerySurfaceAttributes, VAConfigID config, VASurfaceAttrib *attrib_list,
 
 extern "C" VAStatus __vaDriverInit_1_0(VADriverContextP ctx)
 {
-    struct VADriverVTable * const vtbl = ctx->vtable;
+    struct VADriverVTable *const vtbl = ctx->vtable;
 
     fprintf(stderr, "\nTegra VIC/NVDEC Driver initializing\n");
+    fprintf(stderr, "WARNING: This driver is very experimental!\n");
 
     ctx->version_major = 0;
     ctx->version_minor = 1;
-    ctx->max_profiles = 1;
+    ctx->max_profiles = 4;
     ctx->max_entrypoints = 1;
     ctx->max_attributes = 1;
     ctx->max_image_formats = 1;
