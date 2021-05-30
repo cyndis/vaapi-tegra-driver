@@ -21,7 +21,7 @@ Currently supported SoC's:
 - C++14-capable compiler
 - libva headers
 - libdrm headers
-- Kernel with VIC driver and CONFIG_DRM_TEGRA_STAGING=y
+- Kernel with TegraDRM v6 UAPI and NVDEC series applied
 
 ## Building and testing
 
