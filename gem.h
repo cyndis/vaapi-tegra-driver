@@ -24,6 +24,7 @@
 #ifndef GEM_H
 #define GEM_H
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 
