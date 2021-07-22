@@ -21,7 +21,7 @@ Currently supported SoC's:
 - C++14-capable compiler
 - libva headers
 - libdrm headers
-- Kernel with TegraDRM v6 UAPI and NVDEC series applied
+- Kernel with new TegraDRM UAPI support (v5.15 or newer) and NVDEC support (only in linux-next at time of writing)
 
 ## Building and testing
 

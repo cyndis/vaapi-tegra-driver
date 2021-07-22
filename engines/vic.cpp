@@ -304,7 +304,7 @@ int VicDevice::run(VicOp &op)
     }\
     \
     drm_tegra_submit_buf __buf = { 0 };\
-    __buf.mapping_id = (h)->mappingId(_context);\
+    __buf.mapping = (h)->mappingId(_context);\
     __buf.reloc.target_offset = (offs);\
     __buf.reloc.gather_offset_words = i-1;\
     __buf.reloc.shift = 8;\
@@ -354,15 +354,15 @@ int VicDevice::run(VicOp &op)
         submit_cmds[0].gather_uptr.words = i;
 
         drm_tegra_channel_submit submit = { 0 };
-        submit.channel_ctx = _context;
+        submit.context = _context;
         submit.num_bufs = relocs_new.size();
         submit.num_cmds = 1;
         submit.gather_data_words = i;
         submit.bufs_ptr = (__u64)&relocs_new[0];
         submit.cmds_ptr = (__u64)&submit_cmds[0];
         submit.gather_data_ptr = (__u64)&cmd[0];
-        submit.syncpt_incr.id = _syncpt;
-        submit.syncpt_incr.num_incrs = 1;
+        submit.syncpt.id = _syncpt;
+        submit.syncpt.increments = 1;
 
         err = _dev.ioctl(DRM_IOCTL_TEGRA_CHANNEL_SUBMIT, &submit);
         if (err == -1) {
@@ -370,7 +370,7 @@ int VicDevice::run(VicOp &op)
             return err;
         }
 
-        err = _dev.waitSyncpoint(_syncpt, submit.syncpt_incr.fence_value);
+        err = _dev.waitSyncpoint(_syncpt, submit.syncpt.value);
         if (err)
             return err;
     } else {

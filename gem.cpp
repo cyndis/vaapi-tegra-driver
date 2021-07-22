@@ -69,7 +69,7 @@ int DrmDevice::open_channel(uint32_t cl, uint64_t *context) {
         if (err == -1)
             return -1;
 
-        *context = channel_open_args.channel_ctx;
+        *context = channel_open_args.context;
     } else {
         struct drm_tegra_open_channel open_channel_args = {0};
         open_channel_args.client = cl;
@@ -87,7 +87,7 @@ int DrmDevice::open_channel(uint32_t cl, uint64_t *context) {
 int DrmDevice::close_channel(uint64_t context) {
     if (_new_api) {
         struct drm_tegra_channel_close channel_close_args = {0};
-        channel_close_args.channel_ctx = context;
+        channel_close_args.context = context;
 
         return ioctl(DRM_IOCTL_TEGRA_CHANNEL_CLOSE, &channel_close_args);
     } else {
@@ -178,10 +178,10 @@ GemBuffer::GemBuffer(DrmDevice &dev)
 
 GemBuffer::~GemBuffer()
 {
-    for (const auto& [channel_ctx, mapping_id] : _mapping_ids) {
+    for (const auto& [context, mapping] : _mapping_ids) {
         struct drm_tegra_channel_unmap channel_unmap_args = { 0 };
-        channel_unmap_args.channel_ctx = channel_ctx;
-        channel_unmap_args.mapping_id = mapping_id;
+        channel_unmap_args.context = context;
+        channel_unmap_args.mapping = mapping;
         _dev.ioctl(DRM_IOCTL_TEGRA_CHANNEL_UNMAP, &channel_unmap_args);
     }
 
@@ -207,9 +207,9 @@ int GemBuffer::channelMap(uint32_t channel_ctx, bool readwrite)
     if (!_dev.isNewApi() || _mapping_ids.find(channel_ctx) != _mapping_ids.end())
         return 0;
 
-    channel_map_args.channel_ctx = channel_ctx;
+    channel_map_args.context = channel_ctx;
     channel_map_args.handle = _handle;
-    channel_map_args.flags = readwrite ? DRM_TEGRA_CHANNEL_MAP_READWRITE : 0;
+    channel_map_args.flags = readwrite ? DRM_TEGRA_CHANNEL_MAP_READ_WRITE : DRM_TEGRA_CHANNEL_MAP_READ;
 
     err = _dev.ioctl(DRM_IOCTL_TEGRA_CHANNEL_MAP, &channel_map_args);
     if (err == -1) {
@@ -217,7 +217,7 @@ int GemBuffer::channelMap(uint32_t channel_ctx, bool readwrite)
         return err;
     }
 
-    _mapping_ids.insert({channel_ctx, channel_map_args.mapping_id});
+    _mapping_ids.insert({channel_ctx, channel_map_args.mapping});
 
     return 0;
 }
